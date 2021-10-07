@@ -1,4 +1,5 @@
 use crate::{data_dir_path, project_dirs};
+use anyhow::anyhow;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ pub struct Config {
     auth_key: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct Manager {
     db: sled::Db,
 }

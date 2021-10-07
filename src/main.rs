@@ -1,5 +1,7 @@
+mod ui;
+
+use civfun_gmr::Manager;
 use clap::{AppSettings, Clap};
-use giant_multiplayer_robot::Manager;
 
 #[derive(Clap)]
 #[clap(setting = AppSettings::ColoredHelp)]
@@ -21,16 +23,17 @@ enum SubCommand {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let opts: Opts = Opts::parse();
+    // let opts: Opts = Opts::parse();
     // let gmr = Client::new(&opts.auth_key);
     // dbg!(gmr.get_games_and_players().await.unwrap());
-
-    let gmr = Manager::new()?;
-    let config = gmr.get_or_create_config()?;
-    dbg!(&config);
+    // let manager = Manager::new()?;
+    // let config = manager.get_or_create_config()?;
+    // dbg!(&config);
     // let games = gmr.games().await?;
     // gmr.download(games[0].game_id).await?;
     // let path = gmr.check_for_new_save().await?;
+
+    ui::run()?;
 
     Ok(())
 }
