@@ -22,10 +22,6 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-enum Error {
-    FatalError(String),
-}
-
 #[derive(Default)]
 pub struct CivFunUi {
     manager: Option<Manager>,
@@ -42,6 +38,11 @@ pub enum Message {
 impl CivFunUi {
     fn text_colour(&self) -> Color {
         Color::from_rgb(0.9, 0.9, 1.0)
+    }
+
+    fn view_games(&self) -> Element<Message> {
+        Text::new("Hello\n\n\n\nhmmm\n\n\n, world\n\n\n\n\n\n\n\n33\n\n\n\n3\nn\n\n\n\n!").into()
+        // let content = Column::new().max_width(800).spacing(20).push(title);
     }
 }
 
@@ -91,9 +92,7 @@ impl Application for CivFunUi {
         let content: Element<Self::Message> = if let Some(err) = &self.err {
             Text::new(format!("Error: {:?}", err)).into()
         } else {
-            Text::new("Hello\n\n\n\nhmmm\n\n\n, world\n\n\n\n\n\n\n\n33\n\n\n\n3\nn\n\n\n\n!")
-                .into()
-            // let content = Column::new().max_width(800).spacing(20).push(title);
+            self.view_games()
         };
         let content: Container<Self::Message> = Container::new(content).into();
 
