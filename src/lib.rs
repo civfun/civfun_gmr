@@ -1,8 +1,5 @@
-mod api;
-mod manager;
-
-pub use api::Api;
-pub use manager::{Config, Manager};
+pub mod api;
+pub mod manager;
 
 use anyhow::Context;
 use directories::ProjectDirs;

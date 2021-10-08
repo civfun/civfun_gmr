@@ -1,6 +1,5 @@
 mod ui;
 
-use civfun_gmr::Manager;
 use clap::{AppSettings, Clap};
 
 #[derive(Clap)]
@@ -19,8 +18,7 @@ enum SubCommand {
 // Submit(SubmitOpts),
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     // let opts: Opts = Opts::parse();
