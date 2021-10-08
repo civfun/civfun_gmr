@@ -65,8 +65,8 @@ impl Api {
     }
 
     async fn get<T>(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<T>
-    where
-        T: DeserializeOwned,
+        where
+            T: DeserializeOwned,
     {
         let client = reqwest::Client::new();
         let mut query = vec![];
@@ -87,6 +87,10 @@ impl Api {
                 endpoint, extra_query, text,
             )
         })?)
+    }
+
+    pub async fn authenticate_user(&self) -> anyhow::Result<String> {
+        self.get("AuthenticateUser", &[]).await
     }
 
     pub async fn get_games_and_players(
