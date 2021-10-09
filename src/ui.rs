@@ -36,11 +36,26 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+enum Screen {
+    NothingYet,
+    AuthKeyInput,
+    Games,
+    Settings,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Screen::NothingYet
+    }
+}
+
 #[derive(Default)]
 pub struct CivFunUi {
     err: Option<anyhow::Error>,
 
     manager: Option<Manager>,
+
+    screen: Screen,
 
     actions: Actions,
 
@@ -61,6 +76,7 @@ pub enum Message {
     AuthKeyInputChanged(String),
     AuthKeySave,
     PlayCiv,
+    ShowSettings,
 }
 
 impl CivFunUi {
@@ -329,38 +345,26 @@ fn button_side_pad() -> Space {
     Space::new(Length::Units(10), Length::Units(24))
 }
 
-fn button_row(icon: Option<Text>, text: &str) -> Row<Message> {
+fn button_row(icon: Option<Text>, text: Option<&str>) -> Row<Message> {
     let mut row: Row<Message> = Row::new();
     if let Some(icon) = icon {
         row = row.push(button_side_pad()).push(icon);
     }
-    row.push(button_side_pad())
-        .push(
+    if let Some(text) = text {
+        row = row.push(button_side_pad()).push(
             Text::new(text)
                 .vertical_alignment(VerticalAlignment::Center)
                 .height(Length::Fill),
-        )
-        .push(button_side_pad())
+        );
+    }
+    row.push(button_side_pad())
 }
 
 impl Actions {
     fn view(&mut self) -> Element<Message> {
-        // let start_button = Button::new(
-        //     &mut self.start_button_state,
-        //     Row::new()
-        //         .push(button_side_pad())
-        //         .push(steam_icon(20))
-        //         .push(button_side_pad())
-        //         .push(
-        //             Text::new("Play")
-        //                 .vertical_alignment(VerticalAlignment::Center)
-        //                 .height(Length::Fill),
-        //         )
-        //         .push(button_side_pad()),
-        // )
         let start_button = Button::new(
             &mut self.start_button_state,
-            button_row(Some(steam_icon(20)), "Play"),
+            button_row(Some(steam_icon(20)), Some("Play")),
         )
         .on_press(Message::PlayCiv)
         .style(ActionButtonStyle);
@@ -369,7 +373,12 @@ impl Actions {
             .vertical_alignment(VerticalAlignment::Center)
             .horizontal_alignment(HorizontalAlignment::Center);
 
-        let cog = cog_icon(20);
+        let settings_button = Button::new(
+            &mut self.settings_button_state,
+            button_row(Some(cog_icon(20)), None),
+        )
+        .on_press(Message::ShowSettings)
+        .style(ActionButtonStyle);
 
         // let settings_button: Button<Message> =
         //     Button::new(&mut self.settings_button_state, hmm.into()).into();
@@ -378,7 +387,7 @@ impl Actions {
             .height(Length::Units(40))
             .push(start_button.width(Length::Shrink))
             .push(status.width(Length::Fill))
-            .push(cog.width(Length::Shrink))
+            .push(settings_button.width(Length::Shrink))
             .into()
     }
 }
@@ -407,7 +416,7 @@ struct ActionButtonStyle;
 impl ActionButtonStyle {
     fn base() -> button::Style {
         button::Style {
-            background: Some(Color::BLACK.into()),
+            background: Some(black_25alpha().into()),
             text_color: Color::WHITE,
             ..Default::default()
         }
@@ -421,21 +430,21 @@ impl button::StyleSheet for ActionButtonStyle {
 
     fn hovered(&self) -> button::Style {
         button::Style {
-            background: Some(black_50alpha().into()),
+            background: Some(black().into()),
             ..Self::base()
         }
     }
 
     fn pressed(&self) -> button::Style {
         button::Style {
-            background: Some(Color::WHITE.into()),
+            background: Some(black_50alpha().into()),
             ..Self::base()
         }
     }
 
     fn disabled(&self) -> button::Style {
         button::Style {
-            background: Some(Color::BLACK.into()),
+            background: Some(grey_50alpha().into()),
             ..Self::base()
         }
     }
@@ -445,8 +454,17 @@ fn text_colour() -> Color {
     Color::from_rgb(0.9, 0.9, 1.0)
 }
 
+fn black() -> Color {
+    Color::BLACK
+}
 fn black_50alpha() -> Color {
     Color::new(0.0, 0.0, 0.0, 0.5)
 }
 
-struct DebugBackground;
+fn black_25alpha() -> Color {
+    Color::new(0.0, 0.0, 0.0, 0.25)
+}
+
+fn grey_50alpha() -> Color {
+    Color::new(0.5, 0.5, 0.5, 0.5)
+}
