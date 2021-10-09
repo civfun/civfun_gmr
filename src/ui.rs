@@ -4,13 +4,18 @@ use iced::container::{Style, StyleSheet};
 use iced::window::Mode;
 use iced::{
     button, container, executor, scrollable, text_input, time, window, Application, Background,
-    Button, Clipboard, Color, Column, Command, Container, Element, HorizontalAlignment, Length,
-    Row, Rule, Scrollable, Settings, Subscription, Text, TextInput, VerticalAlignment,
+    Button, Clipboard, Color, Column, Command, Container, Element, Font, HorizontalAlignment,
+    Length, Row, Rule, Scrollable, Settings, Subscription, Text, TextInput, VerticalAlignment,
 };
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
 const TITLE: &str = "civ.fun's Multiplayer Robot";
+
+const ICONS: Font = Font::External {
+    name: "Icons",
+    bytes: include_bytes!("../fonts/ionicons.ttf"),
+};
 
 pub fn run() -> anyhow::Result<()> {
     let settings = Settings {
@@ -199,46 +204,67 @@ impl Application for CivFunUi {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        let title = Text::new(TITLE)
-            .width(Length::Fill)
-            .height(Length::Shrink)
-            .size(30)
-            .color(self.text_colour())
-            .horizontal_alignment(HorizontalAlignment::Left)
-            .vertical_alignment(VerticalAlignment::Top);
-
-        let controls = self.view_controls();
-
-        let content: Element<Message> = if let Some(err) = &self.err {
-            Text::new(format!("Error: {:?}", err)).into()
-        } else {
-            if let Some(manager) = &self.manager {
-                if manager.auth_ready() {
-                    ready_view(manager)
-                } else {
-                    enter_auth_key_view(manager)
-                }
-            } else {
-                Text::new("Loading manager...").into()
-            }
-        };
-
-        let content: Container<Self::Message> = Container::new(content).into();
-        // let scrollable: Element<Self::Message> = Scrollable::new(&mut self.scroll)
+        // TODO: Turn content to scrollable
+        // let content = Scrollable::new(&mut self.scroll)
         //     .width(Length::Fill)
         //     .height(Length::Fill)
-        //     .push(content)
-        //     .into();
-        let scrollable = content;
+        //     .push(content());
 
-        let layout: Element<Self::Message> = Column::new().push(title).push(scrollable).into();
+        // let mut actions = Actions::default();
 
-        Container::new(layout)
+        let layout = Column::new()
+            .push(title())
+            .push(self.actions.view())
+            .push(content());
+
+        let outside = Container::new(layout)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(10)
-            // .style(Dark)
-            .into()
+            .padding(10);
+
+        outside.into()
+        // return mock_view(&mut self.actions);
+
+        // let title = Text::new(TITLE)
+        //     .width(Length::Fill)
+        //     .height(Length::Shrink)
+        //     .size(30)
+        //     .color(self.text_colour())
+        //     .horizontal_alignment(HorizontalAlignment::Left)
+        //     .vertical_alignment(VerticalAlignment::Top);
+        //
+        // let controls = self.view_controls();
+        //
+        // let content: Element<Message> = if let Some(err) = &self.err {
+        //     Text::new(format!("Error: {:?}", err)).into()
+        // } else {
+        //     if let Some(manager) = &self.manager {
+        //         if manager.auth_ready() {
+        //             ready_view(manager)
+        //         } else {
+        //             enter_auth_key_view(manager)
+        //         }
+        //     } else {
+        //         Text::new("Loading manager...").into()
+        //     }
+        // };
+        //
+        // let content: Container<Self::Message> = Container::new(content).into();
+        // // let scrollable: Element<Self::Message> = Scrollable::new(&mut self.scroll)
+        // //     .width(Length::Fill)
+        // //     .height(Length::Fill)
+        // //     .push(content)
+        // //     .into();
+        // let scrollable = content;
+        //
+        // let layout: Element<Self::Message> = Column::new().push(title).push(scrollable).into();
+        //
+        // Container::new(layout)
+        //     .width(Length::Fill)
+        //     .height(Length::Fill)
+        //     .padding(10)
+        //     // .style(Dark)
+        //     .into()
     }
 
     fn background_color(&self) -> Color {
@@ -268,4 +294,61 @@ fn games_view<'a>(manager: &Manager) -> Element<Message> {
         c = c.push(Text::new(format!("{}", &game.name)));
     }
     c.into()
+}
+
+fn content() -> Element<'static, Message> {
+    Text::new("content").into()
+}
+
+fn title() -> Element<'static, Message> {
+    Text::new(TITLE)
+        .width(Length::Fill)
+        .height(Length::Shrink)
+        .size(30)
+        .color(text_colour())
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .vertical_alignment(VerticalAlignment::Top)
+        .into()
+}
+
+fn text_colour() -> Color {
+    Color::from_rgb(0.9, 0.9, 1.0)
+}
+
+#[derive(Default)]
+struct Actions {
+    start_button_state: button::State,
+    settings_button_state: button::State,
+}
+
+impl Actions {
+    fn view(&mut self) -> Element<Message> {
+        let start_button = Button::new(&mut self.start_button_state, Text::new("Play"));
+        let status = Text::new("Updating...")
+            .vertical_alignment(VerticalAlignment::Center)
+            .horizontal_alignment(HorizontalAlignment::Center);
+
+        let hmm = warning_icon();
+
+        let settings_button: Button<Message> =
+            Button::new(&mut self.settings_button_state, hmm.into()).into();
+
+        Row::new()
+            .push(start_button.width(Length::Shrink))
+            .push(status.width(Length::Fill))
+            .push(hmm.width(Length::Shrink))
+            .into()
+    }
+}
+
+fn icon(unicode: char) -> Text {
+    Text::new(&unicode.to_string())
+        .font(ICONS)
+        .width(Length::Units(20))
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .size(20)
+}
+
+fn warning_icon() -> Text {
+    icon('')
 }
