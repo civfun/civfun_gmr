@@ -10,10 +10,23 @@ use tracing::{debug, instrument};
 const CONFIG_KEY: &str = "config";
 const DATA_KEY: &str = "data";
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AuthState {
+    Nothing,
+    Fetching,
+    AuthResult(Option<u64>),
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        AuthState::Nothing
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     auth_key: Option<String>,
-    user_id: Option<u64>,
+    auth_state: AuthState,
 }
 
 #[derive(Debug, Default)]
@@ -46,13 +59,13 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub async fn authenticate(&mut self) -> anyhow::Result<()> {
-        let user_id = self.api()?.authenticate_user().await?;
-        debug!("User ID: {}", user_id);
+    pub async fn authenticate(&mut self) -> anyhow::Result<Option<u64>> {
+        let maybe_user_id = self.api()?.authenticate_user().await?;
+        debug!("User ID response: {:?}", maybe_user_id);
         let mut inner = self.inner.write().unwrap();
-        inner.config.user_id = Some(user_id);
-        self.save_config(&mut inner);
-        Ok(())
+        inner.config.auth_state = AuthState::AuthResult(maybe_user_id);
+        self.save_config(&mut inner)?;
+        Ok(maybe_user_id)
     }
 
     /// Ready means we have an auth key and a user id.
@@ -65,7 +78,10 @@ impl Manager {
     }
 
     pub fn user_ready(&self) -> bool {
-        self.inner.read().unwrap().config.user_id.is_some()
+        match self.inner.read().unwrap().config.auth_state {
+            AuthState::AuthResult(Some(_)) => true,
+            _ => false,
+        }
     }
 
     /// This will eventually fetch a second time if the players shown don't exist in the db.

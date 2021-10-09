@@ -1,6 +1,7 @@
 use anyhow::Context;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tracing::{instrument, trace};
 
 pub struct Api {
     auth_key: String,
@@ -64,10 +65,11 @@ impl Api {
         }
     }
 
-    async fn get<T>(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<T>
-    where
-        T: DeserializeOwned,
-    {
+    async fn get_text(
+        &self,
+        endpoint: &str,
+        extra_query: &[(&str, &str)],
+    ) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
         let mut query = vec![];
         query.push(("authKey", self.auth_key.as_str()));
@@ -81,6 +83,16 @@ impl Api {
             .send()
             .await?;
         let text = resp.text().await?;
+        trace!("Response: {}", text);
+        Ok(text)
+    }
+
+    #[instrument(skip(self))]
+    async fn get_json<T>(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let text = self.get_text(endpoint, extra_query).await?;
         Ok(serde_json::from_str(&text).with_context(|| {
             format!(
                 "Endpoint: {} ExtraQuery: {:?} JSON: {}",
@@ -89,8 +101,18 @@ impl Api {
         })?)
     }
 
-    pub async fn authenticate_user(&self) -> anyhow::Result<u64> {
-        self.get("AuthenticateUser", &[]).await
+    /// Returns None when authentication has failed.
+    pub async fn authenticate_user(&self) -> anyhow::Result<Option<u64>> {
+        let text = self.get_text("AuthenticateUser", &[]).await?;
+        if text == "null" {
+            trace!("Got a null response, failing authentication.");
+            return Ok(None);
+        }
+
+        // If it's not "null" we expect a number!
+        let id = text.parse::<u64>()?;
+        trace!("Successful authentication: {}", id);
+        Ok(Some(id))
     }
 
     pub async fn get_games_and_players(
@@ -98,7 +120,7 @@ impl Api {
         player_ids: &[&str],
     ) -> anyhow::Result<GetGamesAndPlayers> {
         let player_id_text = player_ids.join("_");
-        self.get("GetGamesAndPlayers", &[("playerIDText", &player_id_text)])
+        self.get_json("GetGamesAndPlayers", &[("playerIDText", &player_id_text)])
             .await
     }
 }

@@ -1,12 +1,12 @@
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player};
-use civfun_gmr::manager::{Config, Manager};
+use civfun_gmr::manager::{AuthState, Config, Manager};
 use iced::container::{Style, StyleSheet};
 use iced::window::Mode;
 use iced::{
-    button, container, executor, scrollable, text_input, time, window, Application, Background,
-    Button, Clipboard, Color, Column, Command, Container, Element, Font, HorizontalAlignment,
-    Length, Row, Rule, Scrollable, Settings, Space, Subscription, Text, TextInput,
-    VerticalAlignment,
+    button, container, executor, scrollable, text_input, time, window, Align, Application,
+    Background, Button, Clipboard, Color, Column, Command, Container, Element, Font,
+    HorizontalAlignment, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Text,
+    TextInput, VerticalAlignment,
 };
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -36,11 +36,23 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(PartialEq)]
 enum Screen {
     NothingYet,
+    Error(String),
     AuthKeyInput,
     Games,
     Settings,
+}
+
+impl Screen {
+    pub fn should_show_actions(&self) -> bool {
+        match self {
+            Screen::Games => true,
+            Screen::Error(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Default for Screen {
@@ -51,26 +63,23 @@ impl Default for Screen {
 
 #[derive(Default)]
 pub struct CivFunUi {
-    err: Option<anyhow::Error>,
-
-    manager: Option<Manager>,
-
     screen: Screen,
 
+    err: Option<anyhow::Error>,
+    status_text: String,
+    manager: Option<Manager>,
+
     actions: Actions,
+    enter_auth_key: EnterAuthKey,
 
-    auth_key_input_state: text_input::State,
-    auth_key_input_value: String,
-    auth_key_button: button::State,
-
-    scroll: scrollable::State,
+    scroll_state: scrollable::State,
     refresh_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     ManagerLoaded(Manager),
-    Authenticated(()),
+    AuthResponse(Option<u64>),
     RequestRefresh,
     HasRefreshed(()),
     AuthKeyInputChanged(String),
@@ -80,38 +89,38 @@ pub enum Message {
 }
 
 impl CivFunUi {
-    fn content(&mut self) -> Element<Message> {
-        let content: Element<Message> = if let Some(err) = &self.err {
-            Text::new(format!("Error: {:?}", err)).into()
-        } else {
-            if let Some(manager) = &self.manager {
-                if manager.auth_ready() {
-                    games_view(manager)
-                } else {
-                    let message = Text::new("no auth key pls enter");
-                    let input = TextInput::new(
-                        &mut self.auth_key_input_state,
-                        "Type something...",
-                        &self.auth_key_input_value,
-                        Message::AuthKeyInputChanged,
-                    )
-                    .padding(10)
-                    .size(20);
-
-                    let button = Button::new(&mut self.auth_key_button, Text::new("Save"))
-                        .on_press(Message::AuthKeySave); // .on_press
-
-                    Column::new()
-                        .push(message)
-                        .push(Row::new().push(input).push(button))
-                        .into()
-                }
-            } else {
-                Text::new("Loading manager...").into()
-            }
-        };
-        content
-    }
+    // fn content(&mut self) -> Element<Message> {
+    //     let content: Element<Message> = if let Some(err) = &self.err {
+    //         Text::new(format!("Error: {:?}", err)).into()
+    //     } else {
+    //         if let Some(manager) = &self.manager {
+    //             if manager.auth_ready() {
+    //                 games_view(manager)
+    //             } else {
+    //                 let message = Text::new("no auth key pls enter");
+    //                 let input = TextInput::new(
+    //                     &mut self.auth_key_input_state,
+    //                     "Type something...",
+    //                     &self.auth_key_input_value,
+    //                     Message::AuthKeyInputChanged,
+    //                 )
+    //                 .padding(10)
+    //                 .size(20);
+    //
+    //                 let button = Button::new(&mut self.auth_key_button, Text::new("Save"))
+    //                     .on_press(Message::AuthKeySave); // .on_press
+    //
+    //                 Column::new()
+    //                     .push(message)
+    //                     .push(Row::new().push(input).push(button))
+    //                     .into()
+    //             }
+    //         } else {
+    //             Text::new("Loading manager...").into()
+    //         }
+    //     };
+    //     content
+    // }
 }
 
 // TODO: Return Result<> (not anyhow::Result)
@@ -138,9 +147,8 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
     Command::none()
 }
 
-async fn authenticate(mut manager: Manager) {
-    // TODO: unwrap
-    manager.authenticate().await.unwrap();
+async fn authenticate(mut manager: Manager) -> Option<u64> {
+    manager.authenticate().await.unwrap()
 }
 
 impl Application for CivFunUi {
@@ -168,29 +176,40 @@ impl Application for CivFunUi {
         use Message::*;
         match message {
             ManagerLoaded(mut manager) => {
+                debug!("ManagerLoaded");
                 self.manager = Some(manager.clone());
 
-                debug!("ManagerLoaded");
                 if manager.auth_ready() {
                     debug!("☑ Has auth key.");
+                    self.status_text = "Refreshing...".into();
                     return Command::batch([
                         fetch_cmd(&Some(manager.clone())),
-                        Command::perform(authenticate(manager.clone()), Authenticated),
+                        Command::perform(authenticate(manager.clone()), AuthResponse),
                     ]);
+                } else {
+                    self.screen = Screen::AuthKeyInput;
                 }
             }
-            Authenticated(()) => {
+            AuthResponse(Some(_)) => {
                 debug!("Authenticated");
+                self.screen = Screen::Games;
+            }
+            AuthResponse(None) => {
+                debug!("Bad authentication");
+                self.screen = Screen::Error("Bad authentication".into());
             }
             // ManagerLoaded(Err(e)) => {
             //     self.err = Some(e);
             // }
             RequestRefresh => {
                 debug!("RequestRefresh");
+                self.status_text = "Refreshing...".into();
                 return fetch_cmd(&self.manager);
             }
             HasRefreshed(()) => {
                 debug!("HasRefreshed");
+                self.status_text = "".into();
+
                 // info!("Got games!!! {:?}", data);
                 // self.games = data.games;
                 // self.players = data.players;
@@ -200,23 +219,29 @@ impl Application for CivFunUi {
             //     error!("error: {:?}", err);
             // }
             AuthKeyInputChanged(s) => {
-                self.auth_key_input_value = s;
+                self.enter_auth_key.input_value = s;
             }
             AuthKeySave => {
                 if let Some(ref mut manager) = self.manager {
                     // TODO: unwrap
-                    manager.save_auth_key(&self.auth_key_input_value).unwrap();
+                    manager
+                        .save_auth_key(&self.enter_auth_key.input_value.trim())
+                        .unwrap();
                     // Clear the data since the user might have changed auth keys.
                     manager.clear_data().unwrap(); // TODO: unwrap
                     debug!("Saved auth key and reset data.");
+                    self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
+                    self.screen = Screen::Games;
                     return fetch_cmd(&self.manager);
                 } else {
                     error!("Manager not initialised while trying to save auth_key.");
                 }
             }
             PlayCiv => {
+                // TODO: DX version from settings.
                 open::that("steam://rungameid/8930//%5Cdx9").unwrap(); // TODO: unwrap
             }
+            ShowSettings => self.screen = Screen::Settings,
         }
         Command::none()
     }
@@ -227,68 +252,41 @@ impl Application for CivFunUi {
 
     fn view(&mut self) -> Element<Self::Message> {
         // TODO: Turn content to scrollable
-        // let content = Scrollable::new(&mut self.scroll)
-        //     .width(Length::Fill)
-        //     .height(Length::Fill)
-        //     .push(content());
 
-        // let mut actions = Actions::default();
+        let Self {
+            manager,
+            screen,
+            actions,
+            scroll_state,
+            enter_auth_key,
+            ..
+        } = self;
 
-        let layout = Column::new()
-            .push(title())
-            .push(Space::new(Length::Fill, Length::Units(10)))
-            .push(self.actions.view())
-            .push(Space::new(Length::Fill, Length::Units(10)))
-            .push(content());
-
-        let outside = Container::new(layout)
+        let mut layout = Column::new()
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(10);
+            .padding(10)
+            .push(title())
+            .push(Space::new(Length::Fill, Length::Units(10)));
 
-        outside.into()
-        // return mock_view(&mut self.actions);
+        if screen.should_show_actions() {
+            layout = layout
+                .push(actions.view())
+                .push(Space::new(Length::Fill, Length::Units(10)));
+        }
 
-        // let title = Text::new(TITLE)
-        //     .width(Length::Fill)
-        //     .height(Length::Shrink)
-        //     .size(30)
-        //     .color(self.text_colour())
-        //     .horizontal_alignment(HorizontalAlignment::Left)
-        //     .vertical_alignment(VerticalAlignment::Top);
-        //
-        // let controls = self.view_controls();
-        //
-        // let content: Element<Message> = if let Some(err) = &self.err {
-        //     Text::new(format!("Error: {:?}", err)).into()
-        // } else {
-        //     if let Some(manager) = &self.manager {
-        //         if manager.auth_ready() {
-        //             ready_view(manager)
-        //         } else {
-        //             enter_auth_key_view(manager)
-        //         }
-        //     } else {
-        //         Text::new("Loading manager...").into()
-        //     }
-        // };
-        //
-        // let content: Container<Self::Message> = Container::new(content).into();
-        // // let scrollable: Element<Self::Message> = Scrollable::new(&mut self.scroll)
-        // //     .width(Length::Fill)
-        // //     .height(Length::Fill)
-        // //     .push(content)
-        // //     .into();
-        // let scrollable = content;
-        //
-        // let layout: Element<Self::Message> = Column::new().push(title).push(scrollable).into();
-        //
-        // Container::new(layout)
-        //     .width(Length::Fill)
-        //     .height(Length::Fill)
-        //     .padding(10)
-        //     // .style(Dark)
-        //     .into()
+        let content: Element<Message> = match screen {
+            Screen::NothingYet => Text::new("Something funny is going on!").into(),
+            Screen::AuthKeyInput => enter_auth_key.view().into(),
+            Screen::Games => Text::new("g\na\n\n\n\n\nmes\n\n\n\n\n li\nst").into(),
+            Screen::Settings => Text::new("Settings").into(),
+            Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
+        };
+
+        // Force full width of the content. Height should be default for scrolling to work.
+        let content = Container::new(content).width(Length::Fill);
+        let content = Scrollable::new(scroll_state).push(content);
+        layout.push(content).into()
     }
 
     fn background_color(&self) -> Color {
@@ -299,17 +297,6 @@ impl Application for CivFunUi {
 // TODO: Result<Manager> (not anyhow::Result because Message needs to be Clone)
 async fn prepare_manager() -> Manager {
     Manager::new().unwrap() // TODO: unwrap
-}
-
-struct Dark;
-
-impl container::StyleSheet for Dark {
-    fn style(&self) -> Style {
-        Style {
-            background: Some(Color::from_rgb(0.168, 0.243, 0.313).into()),
-            ..Default::default()
-        }
-    }
 }
 
 fn games_view<'a>(manager: &Manager) -> Element<Message> {
@@ -467,4 +454,53 @@ fn black_25alpha() -> Color {
 
 fn grey_50alpha() -> Color {
     Color::new(0.5, 0.5, 0.5, 0.5)
+}
+
+#[derive(Default)]
+struct EnterAuthKey {
+    input_state: text_input::State,
+    input_value: String,
+    button_state: button::State,
+}
+
+impl EnterAuthKey {
+    pub fn view(&mut self) -> Element<Message> {
+        let message = normal_text("Please enter your Authentication Key below.")
+            .horizontal_alignment(HorizontalAlignment::Center);
+
+        let input = TextInput::new(
+            &mut self.input_state,
+            "",
+            &self.input_value,
+            Message::AuthKeyInputChanged,
+        )
+        .padding(10)
+        .size(20);
+
+        let button = Button::new(
+            &mut self.button_state,
+            Text::new("Save")
+                .height(Length::Fill)
+                .vertical_alignment(VerticalAlignment::Center),
+        )
+        .on_press(Message::AuthKeySave);
+
+        Column::new()
+            .align_items(Align::Center)
+            .push(Space::new(Length::Fill, Length::Units(50)))
+            .push(message)
+            .push(Space::new(Length::Fill, Length::Units(10)))
+            .push(
+                Row::new()
+                    .max_width(250)
+                    .height(Length::Units(40))
+                    .push(input)
+                    .push(button.height(Length::Fill)),
+            )
+            .into()
+    }
+}
+
+fn normal_text(s: &str) -> Text {
+    Text::new(s).color(text_colour())
 }
