@@ -1,3 +1,4 @@
+use crate::style;
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player};
 use civfun_gmr::manager::{AuthState, Config, Manager};
 use iced::container::{Style, StyleSheet};
@@ -11,17 +12,7 @@ use iced::{
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
-const TITLE: &str = "civ.fun's Multiplayer Robot";
-
-const FA_SOLID_ICONS: Font = Font::External {
-    name: "FA Solid Icons",
-    bytes: include_bytes!("../fonts/fa-solid-900.ttf"),
-};
-
-const FA_BRANDS_ICONS: Font = Font::External {
-    name: "FA Brand Icons",
-    bytes: include_bytes!("../fonts/fa-brands-400.ttf"),
-};
+pub const TITLE: &str = "civ.fun's Multiplayer Robot";
 
 pub fn run() -> anyhow::Result<()> {
     let settings = Settings {
@@ -228,7 +219,7 @@ impl Application for CivFunUi {
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(10)
-            .push(title())
+            .push(style::title())
             .push(Space::new(Length::Fill, Length::Units(10)));
 
         if screen.should_show_actions() {
@@ -252,7 +243,7 @@ impl Application for CivFunUi {
     }
 
     fn background_color(&self) -> Color {
-        Color::from_rgb(0.168, 0.243, 0.313).into()
+        style::background_color().into()
     }
 }
 
@@ -273,47 +264,17 @@ fn content() -> Element<'static, Message> {
     Text::new("content").into()
 }
 
-fn title() -> Element<'static, Message> {
-    Text::new(TITLE)
-        .width(Length::Fill)
-        .height(Length::Shrink)
-        .size(30)
-        .color(text_colour())
-        .horizontal_alignment(HorizontalAlignment::Left)
-        .vertical_alignment(VerticalAlignment::Top)
-        .into()
-}
-
 #[derive(Default)]
 struct Actions {
     start_button_state: button::State,
     settings_button_state: button::State,
 }
 
-fn button_side_pad() -> Space {
-    Space::new(Length::Units(10), Length::Units(24))
-}
-
-fn button_row(icon: Option<Text>, text: Option<&str>) -> Row<Message> {
-    let mut row: Row<Message> = Row::new();
-    if let Some(icon) = icon {
-        row = row.push(button_side_pad()).push(icon);
-    }
-    if let Some(text) = text {
-        row = row.push(button_side_pad()).push(
-            Text::new(text)
-                .vertical_alignment(VerticalAlignment::Center)
-                .height(Length::Fill),
-        );
-    }
-    row.push(button_side_pad())
-}
-
 impl Actions {
     fn view(&mut self) -> Element<Message> {
         let start_button = Button::new(
             &mut self.start_button_state,
-            button_row(Some(steam_icon(20)), Some("Play")),
+            style::button_row(Some(style::steam_icon(20)), Some("Play")),
         )
         .on_press(Message::PlayCiv)
         .style(ActionButtonStyle);
@@ -324,7 +285,7 @@ impl Actions {
 
         let settings_button = Button::new(
             &mut self.settings_button_state,
-            button_row(Some(cog_icon(20)), None),
+            style::button_row(Some(style::cog_icon(20)), None),
         )
         .on_press(Message::ShowSettings)
         .style(ActionButtonStyle);
@@ -341,31 +302,12 @@ impl Actions {
     }
 }
 
-fn icon(font: Font, unicode: char, size: u16) -> Text {
-    Text::new(&unicode.to_string())
-        .font(font)
-        .width(Length::Units(size))
-        .height(Length::Fill)
-        .horizontal_alignment(HorizontalAlignment::Center)
-        .vertical_alignment(VerticalAlignment::Center)
-        .color(Color::WHITE)
-        .size(size)
-}
-
-fn cog_icon(size: u16) -> Text {
-    icon(FA_SOLID_ICONS, '', size)
-}
-
-fn steam_icon(size: u16) -> Text {
-    icon(FA_BRANDS_ICONS, '', size)
-}
-
 struct ActionButtonStyle;
 
 impl ActionButtonStyle {
     fn base() -> button::Style {
         button::Style {
-            background: Some(black_25alpha().into()),
+            background: Some(style::black_25alpha().into()),
             text_color: Color::WHITE,
             ..Default::default()
         }
@@ -379,43 +321,24 @@ impl button::StyleSheet for ActionButtonStyle {
 
     fn hovered(&self) -> button::Style {
         button::Style {
-            background: Some(black().into()),
+            background: Some(style::black().into()),
             ..Self::base()
         }
     }
 
     fn pressed(&self) -> button::Style {
         button::Style {
-            background: Some(black_50alpha().into()),
+            background: Some(style::black_50alpha().into()),
             ..Self::base()
         }
     }
 
     fn disabled(&self) -> button::Style {
         button::Style {
-            background: Some(grey_50alpha().into()),
+            background: Some(style::grey_50alpha().into()),
             ..Self::base()
         }
     }
-}
-
-fn text_colour() -> Color {
-    Color::from_rgb(0.9, 0.9, 1.0)
-}
-
-fn black() -> Color {
-    Color::BLACK
-}
-fn black_50alpha() -> Color {
-    Color::new(0.0, 0.0, 0.0, 0.5)
-}
-
-fn black_25alpha() -> Color {
-    Color::new(0.0, 0.0, 0.0, 0.25)
-}
-
-fn grey_50alpha() -> Color {
-    Color::new(0.5, 0.5, 0.5, 0.5)
 }
 
 #[derive(Default)]
@@ -427,7 +350,7 @@ struct EnterAuthKey {
 
 impl EnterAuthKey {
     pub fn view(&mut self) -> Element<Message> {
-        let message = normal_text("Please enter your Authentication Key below.")
+        let message = style::normal_text("Please enter your Authentication Key below.")
             .horizontal_alignment(HorizontalAlignment::Center);
 
         let input = TextInput::new(
@@ -461,8 +384,4 @@ impl EnterAuthKey {
             )
             .into()
     }
-}
-
-fn normal_text(s: &str) -> Text {
-    Text::new(s).color(text_colour())
 }

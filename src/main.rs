@@ -1,3 +1,4 @@
+mod style;
 mod ui;
 
 use clap::{AppSettings, Clap};
