@@ -11,37 +11,37 @@ pub struct Api {
 pub struct GetGamesAndPlayers {
     pub games: Vec<Game>,
     pub players: Vec<Player>,
-    pub current_total_points: i64,
+    pub current_total_points: u64,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Game {
     pub name: String,
-    pub game_id: i64,
+    pub game_id: u64,
     pub players: Vec<PlayerOrder>,
     pub current_turn: CurrentTurn,
     #[serde(rename = "Type")]
-    pub typ: i64,
+    pub typ: u8,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlayerOrder {
-    pub user_id: i64,
-    pub turn_order: i64,
+    pub user_id: u64,
+    pub turn_order: u64,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CurrentTurn {
-    pub turn_id: i64,
-    pub number: i64,
-    pub user_id: i64,
+    pub turn_id: u64,
+    pub number: u64,
+    pub user_id: u64,
     pub started: String,
     pub expires: Option<String>,
     pub skipped: bool,
-    pub player_number: i64,
+    pub player_number: u64,
     pub is_first_turn: bool,
 }
 
@@ -49,12 +49,12 @@ pub struct CurrentTurn {
 #[serde(rename_all = "PascalCase")]
 pub struct Player {
     #[serde(rename = "SteamID")]
-    pub steam_id: i64,
+    pub steam_id: u64,
     pub persona_name: String,
     pub avatar_url: String,
-    pub persona_state: i64,
+    pub persona_state: u64,
     #[serde(rename = "GameID")]
-    pub game_id: i64,
+    pub game_id: u64,
 }
 
 impl Api {
@@ -65,8 +65,8 @@ impl Api {
     }
 
     async fn get<T>(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<T>
-        where
-            T: DeserializeOwned,
+    where
+        T: DeserializeOwned,
     {
         let client = reqwest::Client::new();
         let mut query = vec![];
@@ -89,7 +89,7 @@ impl Api {
         })?)
     }
 
-    pub async fn authenticate_user(&self) -> anyhow::Result<String> {
+    pub async fn authenticate_user(&self) -> anyhow::Result<u64> {
         self.get("AuthenticateUser", &[]).await
     }
 

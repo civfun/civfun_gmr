@@ -60,11 +60,7 @@ impl CivFunUi {
         } else {
             if let Some(manager) = &self.manager {
                 if manager.auth_ready() {
-                    if let Some(manager) = &self.manager {
-                        games_view(manager)
-                    } else {
-                        Text::new("Loading...").into()
-                    }
+                    games_view(manager)
                 } else {
                     let message = Text::new("no auth key pls enter");
                     let input = TextInput::new(
@@ -85,11 +81,13 @@ impl CivFunUi {
                         .into()
                 }
             } else {
-                Text::new("Loading...").into()
+                Text::new("Loading manager...").into()
             }
         };
         content
     }
+
+    fn ready_view(&mut self) -> Element<Message> {}
 }
 
 // TODO: Return Result<> (not anyhow::Result)
@@ -97,7 +95,7 @@ async fn fetch(manager: &mut Manager) {
     manager.refresh().await.unwrap(); // TODO: unwrap
 }
 
-#[instrument]
+#[instrument(skip(manager))]
 fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
     debug!("Attempt to fetch.");
     if let Some(ref manager) = manager {
@@ -116,7 +114,7 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
     Command::none()
 }
 
-async fn authenticate(manager: &mut Manager) {
+async fn authenticate(mut manager: Manager) {
     // TODO: unwrap
     manager.authenticate().await.unwrap();
 }
@@ -145,19 +143,21 @@ impl Application for CivFunUi {
     ) -> Command<Self::Message> {
         use Message::*;
         match message {
-            ManagerLoaded(manager) => {
+            ManagerLoaded(mut manager) => {
+                self.manager = Some(manager.clone());
+
                 debug!("ManagerLoaded");
                 if manager.auth_ready() {
                     debug!("☑ Has auth key.");
                     return Command::batch([
-                        fetch_cmd(&Some(manager)),
-                        Command::perform(authenticate(&mut manager), Authenticated),
+                        fetch_cmd(&Some(manager.clone())),
+                        Command::perform(authenticate(manager.clone()), Authenticated),
                     ]);
                 }
-
-                self.manager = Some(manager);
             }
-            Authenticated(()) => {}
+            Authenticated(()) => {
+                debug!("Authenticated");
+            }
             // ManagerLoaded(Err(e)) => {
             //     self.err = Some(e);
             // }
@@ -207,13 +207,29 @@ impl Application for CivFunUi {
             .horizontal_alignment(HorizontalAlignment::Left)
             .vertical_alignment(VerticalAlignment::Top);
 
-        let content = self.content();
+        let controls = self.view_controls();
+
+        let content: Element<Message> = if let Some(err) = &self.err {
+            Text::new(format!("Error: {:?}", err)).into()
+        } else {
+            if let Some(manager) = &self.manager {
+                if manager.auth_ready() {
+                    ready_view(manager)
+                } else {
+                    enter_auth_key_view(manager)
+                }
+            } else {
+                Text::new("Loading manager...").into()
+            }
+        };
+
         let content: Container<Self::Message> = Container::new(content).into();
-        let scrollable: Element<Self::Message> = Scrollable::new(&mut self.scroll)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .push(content)
-            .into();
+        // let scrollable: Element<Self::Message> = Scrollable::new(&mut self.scroll)
+        //     .width(Length::Fill)
+        //     .height(Length::Fill)
+        //     .push(content)
+        //     .into();
+        let scrollable = content;
 
         let layout: Element<Self::Message> = Column::new().push(title).push(scrollable).into();
 
