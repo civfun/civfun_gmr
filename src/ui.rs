@@ -2,11 +2,12 @@ use crate::ui::HasAuthKey::{No, Yes};
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player};
 use civfun_gmr::manager::{Config, Manager};
 use iced::container::{Style, StyleSheet};
+use iced::svg::Handle;
 use iced::window::Mode;
 use iced::{
     button, container, executor, scrollable, text_input, time, window, Application, Background,
-    Button, Clipboard, Color, Column, Command, Container, Element, HorizontalAlignment, Length,
-    Row, Scrollable, Settings, Subscription, Text, TextInput, VerticalAlignment,
+    Button, Clipboard, Color, Column, Command, Container, Element, Font, HorizontalAlignment,
+    Length, Row, Scrollable, Settings, Subscription, Svg, Text, TextInput, VerticalAlignment,
 };
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -55,6 +56,8 @@ pub struct CivFunUi {
 
     scroll: scrollable::State,
     refresh_started_at: Option<Instant>,
+
+    actions: Actions,
 }
 
 #[derive(Debug, Clone)]
@@ -66,11 +69,7 @@ pub enum Message {
     AuthKeySave,
 }
 
-impl CivFunUi {
-    fn text_colour(&self) -> Color {
-        Color::from_rgb(0.9, 0.9, 1.0)
-    }
-}
+impl CivFunUi {}
 
 // TODO: Return Result<> (not anyhow::Result)
 async fn fetch(manager: &mut Manager) {
@@ -84,10 +83,10 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
         let mut manager = manager.clone();
         // TODO: unwrap
         if manager.has_auth_key().unwrap() {
-            return Command::perform(
-                async move { fetch(&mut manager).await },
-                Message::HasRefreshed,
-            );
+            // return Command::perform(
+            //     async move { fetch(&mut manager).await },
+            //     Message::HasRefreshed,
+            // );
         }
     }
 
@@ -176,11 +175,32 @@ impl Application for CivFunUi {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
+        // TODO: Turn content to scrollable
+        // let content = Scrollable::new(&mut self.scroll)
+        //     .width(Length::Fill)
+        //     .height(Length::Fill)
+        //     .push(content());
+
+        // let mut actions = Actions::default();
+
+        let layout = Column::new()
+            .push(title())
+            .push(self.actions.view())
+            .push(content());
+
+        let outside = Container::new(layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(10);
+
+        return outside.into();
+        // return mock_view(&mut self.actions);
+
         let title = Text::new(TITLE)
             .width(Length::Fill)
             .height(Length::Shrink)
             .size(30)
-            .color(self.text_colour())
+            .color(text_colour())
             .horizontal_alignment(HorizontalAlignment::Left)
             .vertical_alignment(VerticalAlignment::Top);
 
@@ -188,7 +208,8 @@ impl Application for CivFunUi {
             Text::new(format!("Error: {:?}", err)).into()
         } else {
             if self.has_auth_key == Yes {
-                games_view(&self.manager)
+                // games_view(&self.manager)
+                Text::new("").into()
             } else if self.has_auth_key == No {
                 let message = Text::new("no auth key pls enter");
                 let input = TextInput::new(
@@ -253,8 +274,72 @@ fn games_view<'a>(manager: &Manager) -> Element<Message> {
     let mut c = Column::new();
     c = c.push(Text::new("ASDF"));
     c = c.push(Text::new("ASDF2"));
-    for game in manager.games() {
-        c = c.push(Text::new(format!("ASDF{}", &game.name)));
-    }
+    // for game in manager.games() {
+    //     c = c.push(Text::new(format!("ASDF{}", &game.name)));
+    // }
     c.into()
+}
+
+// fn mock_view(actions: &'static mut Actions) -> Element<'static, Message> {}
+
+fn content() -> Element<'static, Message> {
+    Text::new("content").into()
+}
+
+fn title() -> Element<'static, Message> {
+    Text::new(TITLE)
+        .width(Length::Fill)
+        .height(Length::Shrink)
+        .size(30)
+        .color(text_colour())
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .vertical_alignment(VerticalAlignment::Top)
+        .into()
+}
+
+fn text_colour() -> Color {
+    Color::from_rgb(0.9, 0.9, 1.0)
+}
+
+#[derive(Default)]
+struct Actions {
+    start_button_state: button::State,
+    settings_button_state: button::State,
+}
+
+const ICONS: Font = Font::External {
+    name: "Icons",
+    bytes: include_bytes!("../fonts/ionicons.ttf"),
+};
+
+impl Actions {
+    fn view(&mut self) -> Element<Message> {
+        let start_button = Button::new(&mut self.start_button_state, Text::new("Play"));
+        let status = Text::new("Updating...")
+            .vertical_alignment(VerticalAlignment::Center)
+            .horizontal_alignment(HorizontalAlignment::Center);
+
+        let hmm = warning_icon();
+
+        let settings_button: Button<Message> =
+            Button::new(&mut self.settings_button_state, hmm.into()).into();
+
+        Row::new()
+            .push(start_button.width(Length::Shrink))
+            .push(status.width(Length::Fill))
+            .push(hmm.width(Length::Shrink))
+            .into()
+    }
+}
+
+fn icon(unicode: char) -> Text {
+    Text::new(&unicode.to_string())
+        .font(ICONS)
+        .width(Length::Units(20))
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .size(20)
+}
+
+fn warning_icon() -> Text {
+    icon('')
 }

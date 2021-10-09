@@ -34,8 +34,8 @@ impl Manager {
             db,
             latest_data: None,
         };
-        let config = s.get_or_create_config()?;
-        let data = s.load_data()?;
+        // let config = s.get_or_create_config()?;
+        // let data = s.load_data()?;
 
         Ok(s)
     }
@@ -93,10 +93,11 @@ impl Manager {
     }
 
     fn latest(&self) -> anyhow::Result<&GetGamesAndPlayers> {
-        if let Some(ref data) = self.latest_data {
-            Ok(data)
-        } else {
-        }
+        todo!()
+        // if let Some(ref data) = self.latest_data {
+        //     Ok(data)
+        // } else {
+        // }
     }
 
     fn api(&self) -> anyhow::Result<Api> {
