@@ -88,41 +88,6 @@ pub enum Message {
     ShowSettings,
 }
 
-impl CivFunUi {
-    // fn content(&mut self) -> Element<Message> {
-    //     let content: Element<Message> = if let Some(err) = &self.err {
-    //         Text::new(format!("Error: {:?}", err)).into()
-    //     } else {
-    //         if let Some(manager) = &self.manager {
-    //             if manager.auth_ready() {
-    //                 games_view(manager)
-    //             } else {
-    //                 let message = Text::new("no auth key pls enter");
-    //                 let input = TextInput::new(
-    //                     &mut self.auth_key_input_state,
-    //                     "Type something...",
-    //                     &self.auth_key_input_value,
-    //                     Message::AuthKeyInputChanged,
-    //                 )
-    //                 .padding(10)
-    //                 .size(20);
-    //
-    //                 let button = Button::new(&mut self.auth_key_button, Text::new("Save"))
-    //                     .on_press(Message::AuthKeySave); // .on_press
-    //
-    //                 Column::new()
-    //                     .push(message)
-    //                     .push(Row::new().push(input).push(button))
-    //                     .into()
-    //             }
-    //         } else {
-    //             Text::new("Loading manager...").into()
-    //         }
-    //     };
-    //     content
-    // }
-}
-
 // TODO: Return Result<> (not anyhow::Result)
 async fn fetch(manager: &mut Manager) {
     manager.refresh().await.unwrap(); // TODO: unwrap
@@ -198,9 +163,6 @@ impl Application for CivFunUi {
                 debug!("Bad authentication");
                 self.screen = Screen::Error("Bad authentication".into());
             }
-            // ManagerLoaded(Err(e)) => {
-            //     self.err = Some(e);
-            // }
             RequestRefresh => {
                 debug!("RequestRefresh");
                 self.status_text = "Refreshing...".into();
