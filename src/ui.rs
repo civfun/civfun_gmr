@@ -1,4 +1,3 @@
-use crate::style;
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player};
 use civfun_gmr::manager::{AuthState, Config, Manager};
 use iced::container::{Style, StyleSheet};
@@ -12,7 +11,7 @@ use iced::{
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
-pub const TITLE: &str = "civ.fun's Multiplayer Robot";
+use crate::{style, TITLE, VERSION};
 
 pub fn run() -> anyhow::Result<()> {
     let settings = Settings {
@@ -120,7 +119,7 @@ impl Application for CivFunUi {
     }
 
     fn title(&self) -> String {
-        TITLE.into()
+        format!("{} v{}", TITLE, VERSION)
     }
 
     #[instrument(skip(self, _clipboard, message))]

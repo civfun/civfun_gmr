@@ -1,7 +1,9 @@
-use crate::ui::{Message, TITLE};
 use iced::{
     Color, Element, Font, HorizontalAlignment, Length, Row, Space, Text, VerticalAlignment,
 };
+
+use crate::ui::Message;
+use crate::TITLE;
 
 const FA_SOLID_ICONS: Font = Font::External {
     name: "FA Solid Icons",
