@@ -1,4 +1,6 @@
-use civfun_gmr::api::{Game, GetGamesAndPlayers, Player};
+use crate::style::ActionButtonStyle;
+use crate::{style, TITLE, VERSION};
+use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
 use civfun_gmr::manager::{AuthState, Config, Manager};
 use iced::container::{Style, StyleSheet};
 use iced::window::Mode;
@@ -8,10 +10,9 @@ use iced::{
     HorizontalAlignment, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Text,
     TextInput, VerticalAlignment,
 };
+use tokio::task::spawn_blocking;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
-
-use crate::{style, TITLE, VERSION};
 
 pub fn run() -> anyhow::Result<()> {
     let settings = Settings {
@@ -69,7 +70,7 @@ pub struct CivFunUi {
 #[derive(Debug, Clone)]
 pub enum Message {
     ManagerLoaded(Manager),
-    AuthResponse(Option<u64>),
+    AuthResponse(Option<UserId>),
     RequestRefresh,
     HasRefreshed(()),
     AuthKeyInputChanged(String),
@@ -79,30 +80,37 @@ pub enum Message {
 }
 
 // TODO: Return Result<> (not anyhow::Result)
-async fn fetch(manager: &mut Manager) {
+async fn fetch(mut manager: Manager) {
     manager.refresh().await.unwrap(); // TODO: unwrap
 }
 
 #[instrument(skip(manager))]
 fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
     debug!("Attempt to fetch.");
-    if let Some(ref manager) = manager {
-        let mut manager = manager.clone();
-        if manager.auth_ready() {
-            return Command::perform(
-                async move {
-                    fetch(&mut manager).await;
-                },
-                Message::HasRefreshed,
-            );
+    let manager = match manager {
+        Some(ref m) => m.clone(),
+        None => {
+            warn!("Manager not set while trying to fetch.");
+            return Command::none();
         }
+    };
+
+    let is_auth_ready = manager.auth_ready();
+    if !is_auth_ready {
+        return Command::none();
     }
 
-    warn!("Manager not set while trying to fetch.");
-    Command::none()
+    let mut manager = manager.clone();
+    // tokio::task::spawn_blocking(
+    // tokio::spawn(async {
+    //     dbg!(manager);
+    // })
+    // )
+    // .await;
+    Command::perform(fetch(manager), Message::HasRefreshed)
 }
 
-async fn authenticate(mut manager: Manager) -> Option<u64> {
+async fn authenticate(mut manager: Manager) -> Option<UserId> {
     manager.authenticate().await.unwrap()
 }
 
@@ -180,7 +188,7 @@ impl Application for CivFunUi {
                         .save_auth_key(&self.enter_auth_key.input_value.trim())
                         .unwrap();
                     // Clear the data since the user might have changed auth keys.
-                    manager.clear_data().unwrap(); // TODO: unwrap
+                    manager.clear_games().unwrap(); // TODO: unwrap
                     debug!("Saved auth key and reset data.");
                     self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
                     self.screen = Screen::Games;
@@ -259,10 +267,6 @@ fn games_view<'a>(manager: &Manager) -> Element<Message> {
     c.into()
 }
 
-fn content() -> Element<'static, Message> {
-    Text::new("content").into()
-}
-
 #[derive(Default)]
 struct Actions {
     start_button_state: button::State,
@@ -298,45 +302,6 @@ impl Actions {
             .push(status.width(Length::Fill))
             .push(settings_button.width(Length::Shrink))
             .into()
-    }
-}
-
-struct ActionButtonStyle;
-
-impl ActionButtonStyle {
-    fn base() -> button::Style {
-        button::Style {
-            background: Some(style::black_25alpha().into()),
-            text_color: Color::WHITE,
-            ..Default::default()
-        }
-    }
-}
-
-impl button::StyleSheet for ActionButtonStyle {
-    fn active(&self) -> button::Style {
-        Self::base()
-    }
-
-    fn hovered(&self) -> button::Style {
-        button::Style {
-            background: Some(style::black().into()),
-            ..Self::base()
-        }
-    }
-
-    fn pressed(&self) -> button::Style {
-        button::Style {
-            background: Some(style::black_50alpha().into()),
-            ..Self::base()
-        }
-    }
-
-    fn disabled(&self) -> button::Style {
-        button::Style {
-            background: Some(style::grey_50alpha().into()),
-            ..Self::base()
-        }
     }
 }
 

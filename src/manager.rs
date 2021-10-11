@@ -1,20 +1,24 @@
-use crate::api::{Api, Game, GetGamesAndPlayers};
+use crate::api::{Api, Game, GameId, GetGamesAndPlayers, UserId};
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use tokio::task::JoinHandle;
 use tracing::{debug, instrument};
 
 const CONFIG_KEY: &str = "config";
-const DATA_KEY: &str = "data";
+const GAME_API_RESPONSE_KEY: &str = "data";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuthState {
     Nothing,
     Fetching,
-    AuthResult(Option<u64>),
+    AuthResult(Option<UserId>),
 }
 
 impl Default for AuthState {
@@ -32,7 +36,15 @@ pub struct Config {
 #[derive(Debug, Default)]
 struct Inner {
     config: Config,
-    data: GetGamesAndPlayers,
+    games: GetGamesAndPlayers,
+    downloads: HashMap<GameId, Download>,
+}
+
+#[derive(Debug)]
+pub enum Download {
+    Idle,
+    Downloading(JoinHandle<()>, Receiver<()>),
+    Complete,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +66,12 @@ impl Manager {
             inner: Default::default(),
         };
         s.load_config()?;
-        s.load_data()?;
+        s.load_games()?;
         Ok(s)
     }
 
     #[instrument(skip(self))]
-    pub async fn authenticate(&mut self) -> anyhow::Result<Option<u64>> {
+    pub async fn authenticate(&mut self) -> anyhow::Result<Option<UserId>> {
         let maybe_user_id = self.api()?.authenticate_user().await?;
         debug!("User ID response: {:?}", maybe_user_id);
         let mut inner = self.inner.write().unwrap();
@@ -87,9 +99,72 @@ impl Manager {
     /// This will eventually fetch a second time if the players shown don't exist in the db.
     /// It will also start downloading games if they don't exist.
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
-        let data = self.api()?.get_games_and_players(&[]).await?;
-        self.save_data(data)?;
+        let games = self.api()?.get_games_and_players(&[]).await?;
+        dbg!("???? 1");
+        self.save_games(games)?;
+        // TODO
+        // let unknown_players = self.filter_unknown_players();
+        // if unknown_players.len() > 0 {
+        //     let data = self.api()?.get_games_and_players([]).await?;
+        // }
+        dbg!("???? 2");
+        self.start_downloads().await;
+        dbg!("???? 3");
         Ok(())
+    }
+
+    pub fn user_id(&self) -> Option<UserId> {
+        if let AuthState::AuthResult(maybe_id) = self.inner.read().unwrap().config.auth_state {
+            maybe_id
+        } else {
+            None
+        }
+    }
+
+    pub fn get_download_info(&self, game_id: &GameId) -> &Download {
+        // let inner = self.inner.read().unwrap();
+        // // TODO: unwrap
+        // inner.downloads.get(&game_id).unwrap()
+        todo!()
+    }
+
+    pub async fn start_downloads(&mut self) -> anyhow::Result<Option<()>> {
+        // If we don't have a user_id, don't bother trying.
+        dbg!("???? xxxx");
+        let user_id = match self.user_id() {
+            None => return Ok(None),
+            Some(u) => u,
+        };
+
+        let inner = self.inner.read().unwrap();
+        dbg!("????");
+        for game in &inner.games.games {
+            if !game.is_user_id_turn(&user_id) {
+                continue;
+            }
+
+            // let info = self.get_download_info(&game.game_id);
+            // if let Download::Downloading(..) = info {
+            //     continue;
+            // }
+            // dbg!(info);
+            // let game_id = game.game_id.clone();
+            // let (rx, handle) = self
+            //     .api()?
+            //     .get_latest_save_file_bytes(&game_id)
+            //     .await
+            //     .unwrap();
+
+            self.api()?.get_latest_save_file_bytes(&game_id).await;
+
+            // TODO: unwrap
+        }
+
+        Ok(Some(())) // TODO: return something useful?
+    }
+
+    pub fn download_status(&self) -> Vec<Download> {
+        todo!()
     }
 
     pub fn load_config(&mut self) -> anyhow::Result<()> {
@@ -116,26 +191,26 @@ impl Manager {
         Ok(())
     }
 
-    pub fn load_data(&mut self) -> anyhow::Result<()> {
-        let data = match self.db.get(DATA_KEY)? {
+    pub fn load_games(&mut self) -> anyhow::Result<()> {
+        let data = match self.db.get(GAME_API_RESPONSE_KEY)? {
             Some(b) => serde_json::from_slice(&b)?,
             None => GetGamesAndPlayers::default(),
         };
 
-        self.inner.write().unwrap().data = data;
+        self.inner.write().unwrap().games = data;
         Ok(())
     }
 
-    pub fn save_data(&self, data: GetGamesAndPlayers) -> anyhow::Result<()> {
+    pub fn save_games(&self, data: GetGamesAndPlayers) -> anyhow::Result<()> {
         let mut inner = self.inner.write().unwrap();
         let encoded = serde_json::to_vec(&data)?;
-        self.db.insert(DATA_KEY, encoded.as_slice())?;
-        inner.data = data;
+        self.db.insert(GAME_API_RESPONSE_KEY, encoded.as_slice())?;
+        inner.games = data;
         Ok(())
     }
 
-    pub fn clear_data(&self) -> anyhow::Result<()> {
-        self.db.remove(DATA_KEY)?;
+    pub fn clear_games(&self) -> anyhow::Result<()> {
+        self.db.remove(GAME_API_RESPONSE_KEY)?;
         Ok(())
     }
 
@@ -148,11 +223,6 @@ impl Manager {
     }
 
     pub fn games(&self) -> Vec<Game> {
-        self.inner.read().unwrap().data.games.clone()
-    }
-
-    pub fn reorder_games(&mut self) {
-        // self.latest_data.games.sort_by(|a, b| {
-        // })
+        self.inner.read().unwrap().games.games.clone()
     }
 }

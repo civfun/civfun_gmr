@@ -1,10 +1,43 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use iced::futures::{Stream, StreamExt};
+use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::convert::{TryFrom, TryInto};
+use std::fmt::{Display, Formatter};
+use std::io::Bytes;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{instrument, trace};
 
-pub struct Api {
-    auth_key: String,
+#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserId(u64);
+
+impl From<u64> for UserId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl Display for UserId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+pub struct GameId(u32);
+
+impl From<u32> for GameId {
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl Display for GameId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,26 +52,32 @@ pub struct GetGamesAndPlayers {
 #[serde(rename_all = "PascalCase")]
 pub struct Game {
     pub name: String,
-    pub game_id: u64,
+    pub game_id: GameId,
     pub players: Vec<PlayerOrder>,
     pub current_turn: CurrentTurn,
     #[serde(rename = "Type")]
     pub typ: u8,
 }
 
+impl Game {
+    pub fn is_user_id_turn(&self, user_id: &UserId) -> bool {
+        &self.current_turn.user_id == user_id
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlayerOrder {
-    pub user_id: u64,
-    pub turn_order: u64,
+    pub user_id: UserId,
+    pub turn_order: u16,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CurrentTurn {
-    pub turn_id: u64,
+    pub turn_id: u32,
     pub number: u64,
-    pub user_id: u64,
+    pub user_id: UserId,
     pub started: String,
     pub expires: Option<String>,
     pub skipped: bool,
@@ -49,13 +88,41 @@ pub struct CurrentTurn {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Player {
+    // Not sure if this is right?
     #[serde(rename = "SteamID")]
-    pub steam_id: u64,
+    pub steam_id: UserId,
     pub persona_name: String,
     pub avatar_url: String,
     pub persona_state: u64,
     #[serde(rename = "GameID")]
-    pub game_id: u64,
+    pub game_id: GameId,
+}
+
+#[derive(Debug)]
+pub struct Percentage(f32);
+
+impl TryFrom<f32> for Percentage {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        if value < 0.0 || value > 1.0 {
+            return Err(anyhow!("Percentage outside of range: {}", value));
+        }
+        Ok(Percentage(value))
+    }
+}
+
+#[derive(Debug)]
+pub enum DownloadMessage {
+    Err(anyhow::Error),
+    Started(Option<u64>),
+    Chunk(Option<Percentage>, Vec<u8>),
+    Done,
+}
+
+#[derive(Clone)]
+pub struct Api {
+    auth_key: String,
 }
 
 impl Api {
@@ -65,24 +132,31 @@ impl Api {
         }
     }
 
-    async fn get_text(
-        &self,
-        endpoint: &str,
-        extra_query: &[(&str, &str)],
-    ) -> anyhow::Result<String> {
+    #[instrument(skip(self))]
+    async fn get(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<Response> {
         let client = reqwest::Client::new();
         let mut query = vec![];
         query.push(("authKey", self.auth_key.as_str()));
         query.extend_from_slice(extra_query);
-        let resp = client
+        trace!("Making request.");
+        Ok(client
             .get(format!(
                 "http://multiplayerrobot.com/api/Diplomacy/{}",
                 endpoint
             ))
             .query(&query)
             .send()
-            .await?;
-        let text = resp.text().await?;
+            .await?)
+    }
+
+    #[instrument(skip(self))]
+    async fn get_text(
+        &self,
+        endpoint: &str,
+        extra_query: &[(&str, &str)],
+    ) -> anyhow::Result<String> {
+        let response = self.get(endpoint, extra_query).await?;
+        let text = response.text().await?;
         trace!("Response: {}", text);
         Ok(text)
     }
@@ -102,7 +176,7 @@ impl Api {
     }
 
     /// Returns None when authentication has failed.
-    pub async fn authenticate_user(&self) -> anyhow::Result<Option<u64>> {
+    pub async fn authenticate_user(&self) -> anyhow::Result<Option<UserId>> {
         let text = self.get_text("AuthenticateUser", &[]).await?;
         if text == "null" {
             trace!("Got a null response, failing authentication.");
@@ -112,15 +186,55 @@ impl Api {
         // If it's not "null" we expect a number!
         let id = text.parse::<u64>()?;
         trace!("Successful authentication: {}", id);
-        Ok(Some(id))
+        Ok(Some(id.into()))
     }
 
     pub async fn get_games_and_players(
         &self,
-        player_ids: &[&str],
+        player_ids: &[&UserId],
     ) -> anyhow::Result<GetGamesAndPlayers> {
-        let player_id_text = player_ids.join("_");
+        let player_id_text = player_ids
+            .iter()
+            .map(|u| format!("{}", u))
+            .collect::<Vec<_>>()
+            .join("_");
         self.get_json("GetGamesAndPlayers", &[("playerIDText", &player_id_text)])
             .await
+    }
+
+    pub async fn get_latest_save_file_bytes(
+        &self,
+        game_id: &GameId,
+    ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
+        // let s = self.clone();
+        // let game_id = game_id.clone();
+        // let (tx, rx) = mpsc::channel(32);
+        // let handle = tokio::spawn(async move {
+        //     let response = s
+        //         .get(
+        //             "GetLatestSaveFileBytes",
+        //             &[("gameId", &format!("{}", game_id))],
+        //         )
+        //         .await
+        //         .unwrap(); // TODO: unwrap
+        //     let size = response.content_length();
+        //     trace!("Starting download of {:?} bytes.", size);
+        //     tx.send(DownloadMessage::Started(size)).await.unwrap();
+        //     let mut stream = response.bytes_stream();
+        //     let mut collected = 0;
+        //     while let Some(bytes) = stream.next().await {
+        //         let bytes = bytes.unwrap().to_vec(); // TODO: unwrap
+        //         collected += bytes.len();
+        //         let percentage =
+        //             size.map(|size| (collected as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
+        //         tx.send(DownloadMessage::Chunk(percentage, bytes))
+        //             .await
+        //             .unwrap();
+        //     }
+        //     tx.send(DownloadMessage::Done).await.unwrap();
+        // });
+        //
+        // Ok((rx, handle))
+        todo!()
     }
 }

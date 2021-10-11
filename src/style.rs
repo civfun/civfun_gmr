@@ -1,5 +1,5 @@
 use iced::{
-    Color, Element, Font, HorizontalAlignment, Length, Row, Space, Text, VerticalAlignment,
+    button, Color, Element, Font, HorizontalAlignment, Length, Row, Space, Text, VerticalAlignment,
 };
 
 use crate::ui::Message;
@@ -90,4 +90,43 @@ pub fn background_color() -> Color {
 
 pub fn normal_text(s: &str) -> Text {
     Text::new(s).color(text_colour())
+}
+
+pub struct ActionButtonStyle;
+
+impl ActionButtonStyle {
+    fn base() -> button::Style {
+        button::Style {
+            background: Some(black_25alpha().into()),
+            text_color: Color::WHITE,
+            ..Default::default()
+        }
+    }
+}
+
+impl button::StyleSheet for ActionButtonStyle {
+    fn active(&self) -> button::Style {
+        Self::base()
+    }
+
+    fn hovered(&self) -> button::Style {
+        button::Style {
+            background: Some(black().into()),
+            ..Self::base()
+        }
+    }
+
+    fn pressed(&self) -> button::Style {
+        button::Style {
+            background: Some(black_50alpha().into()),
+            ..Self::base()
+        }
+    }
+
+    fn disabled(&self) -> button::Style {
+        button::Style {
+            background: Some(grey_50alpha().into()),
+            ..Self::base()
+        }
+    }
 }
