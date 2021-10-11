@@ -1,4 +1,4 @@
-use crate::api::{Api, Game, GameId, GetGamesAndPlayers, UserId};
+use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UserId};
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
@@ -43,7 +43,7 @@ struct Inner {
 #[derive(Debug)]
 pub enum Download {
     Idle,
-    Downloading(JoinHandle<()>, Receiver<()>),
+    Downloading(mpsc::Receiver<DownloadMessage>),
     Complete,
 }
 
@@ -108,7 +108,7 @@ impl Manager {
         //     let data = self.api()?.get_games_and_players([]).await?;
         // }
         dbg!("???? 2");
-        self.start_downloads().await;
+        self.start_downloads().await.unwrap();
         dbg!("???? 3");
         Ok(())
     }
@@ -121,43 +121,42 @@ impl Manager {
         }
     }
 
-    pub fn get_download_info(&self, game_id: &GameId) -> &Download {
-        // let inner = self.inner.read().unwrap();
-        // // TODO: unwrap
-        // inner.downloads.get(&game_id).unwrap()
-        todo!()
-    }
-
     pub async fn start_downloads(&mut self) -> anyhow::Result<Option<()>> {
         // If we don't have a user_id, don't bother trying.
-        dbg!("???? xxxx");
         let user_id = match self.user_id() {
             None => return Ok(None),
             Some(u) => u,
         };
 
-        let inner = self.inner.read().unwrap();
+        let games = {
+            let inner = self.inner.read().unwrap();
+            inner.games.clone()
+        };
+
         dbg!("????");
-        for game in &inner.games.games {
+        for game in &games.games {
             if !game.is_user_id_turn(&user_id) {
                 continue;
             }
 
-            // let info = self.get_download_info(&game.game_id);
-            // if let Download::Downloading(..) = info {
-            //     continue;
-            // }
-            // dbg!(info);
-            // let game_id = game.game_id.clone();
-            // let (rx, handle) = self
-            //     .api()?
-            //     .get_latest_save_file_bytes(&game_id)
-            //     .await
-            //     .unwrap();
+            {
+                let mut inner = self.inner.read().unwrap();
+                if let Some(Download::Downloading(..)) = inner.downloads.get(&game.game_id) {
+                    continue;
+                }
+            }
 
-            self.api()?.get_latest_save_file_bytes(&game_id).await;
+            let game_id = game.game_id.clone();
+            let (rx, handle) = self
+                .api()?
+                .get_latest_save_file_bytes(&game_id)
+                .await
+                .unwrap();
 
-            // TODO: unwrap
+            {
+                let mut inner = self.inner.write().unwrap();
+                inner.downloads.insert(game_id, Download::Downloading(rx));
+            }
         }
 
         Ok(Some(())) // TODO: return something useful?

@@ -98,7 +98,7 @@ pub struct Player {
     pub game_id: GameId,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Percentage(f32);
 
 impl TryFrom<f32> for Percentage {
@@ -112,9 +112,9 @@ impl TryFrom<f32> for Percentage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DownloadMessage {
-    Err(anyhow::Error),
+    Error(String),
     Started(Option<u64>),
     Chunk(Option<Percentage>, Vec<u8>),
     Done,
@@ -206,35 +206,34 @@ impl Api {
         &self,
         game_id: &GameId,
     ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
-        // let s = self.clone();
-        // let game_id = game_id.clone();
-        // let (tx, rx) = mpsc::channel(32);
-        // let handle = tokio::spawn(async move {
-        //     let response = s
-        //         .get(
-        //             "GetLatestSaveFileBytes",
-        //             &[("gameId", &format!("{}", game_id))],
-        //         )
-        //         .await
-        //         .unwrap(); // TODO: unwrap
-        //     let size = response.content_length();
-        //     trace!("Starting download of {:?} bytes.", size);
-        //     tx.send(DownloadMessage::Started(size)).await.unwrap();
-        //     let mut stream = response.bytes_stream();
-        //     let mut collected = 0;
-        //     while let Some(bytes) = stream.next().await {
-        //         let bytes = bytes.unwrap().to_vec(); // TODO: unwrap
-        //         collected += bytes.len();
-        //         let percentage =
-        //             size.map(|size| (collected as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
-        //         tx.send(DownloadMessage::Chunk(percentage, bytes))
-        //             .await
-        //             .unwrap();
-        //     }
-        //     tx.send(DownloadMessage::Done).await.unwrap();
-        // });
-        //
-        // Ok((rx, handle))
-        todo!()
+        let s = self.clone();
+        let game_id = game_id.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let handle = tokio::spawn(async move {
+            let response = s
+                .get(
+                    "GetLatestSaveFileBytes",
+                    &[("gameId", &format!("{}", game_id))],
+                )
+                .await
+                .unwrap(); // TODO: unwrap
+            let size = response.content_length();
+            trace!("Starting download of {:?} bytes.", size);
+            tx.send(DownloadMessage::Started(size)).await.unwrap();
+            let mut stream = response.bytes_stream();
+            let mut collected = 0;
+            while let Some(bytes) = stream.next().await {
+                let bytes = bytes.unwrap().to_vec(); // TODO: unwrap
+                collected += bytes.len();
+                let percentage =
+                    size.map(|size| (collected as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
+                tx.send(DownloadMessage::Chunk(percentage, bytes))
+                    .await
+                    .unwrap();
+            }
+            tx.send(DownloadMessage::Done).await.unwrap();
+        });
+
+        Ok((rx, handle))
     }
 }

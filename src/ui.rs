@@ -101,13 +101,12 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
     }
 
     let mut manager = manager.clone();
-    // tokio::task::spawn_blocking(
-    // tokio::spawn(async {
-    //     dbg!(manager);
-    // })
-    // )
-    // .await;
-    Command::perform(fetch(manager), Message::HasRefreshed)
+    Command::perform(
+        async {
+            fetch(manager).await;
+        },
+        Message::HasRefreshed,
+    )
 }
 
 async fn authenticate(mut manager: Manager) -> Option<UserId> {
