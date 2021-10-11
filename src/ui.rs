@@ -73,6 +73,7 @@ pub enum Message {
     AuthResponse(Option<UserId>),
     RequestRefresh,
     HasRefreshed(()),
+    ProcessDownloads,
     AuthKeyInputChanged(String),
     AuthKeySave,
     PlayCiv,
@@ -174,6 +175,11 @@ impl Application for CivFunUi {
                 // self.players = data.players;
                 // info!("games len {}", self.games.len());
             }
+            ProcessDownloads => {
+                if let Some(ref mut manager) = self.manager {
+                    manager.process_downloads();
+                }
+            }
             // Refreshed(Err(err)) => {
             //     error!("error: {:?}", err);
             // }
@@ -206,7 +212,10 @@ impl Application for CivFunUi {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh)
+        Subscription::batch([
+            time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessDownloads),
+        ])
     }
 
     fn view(&mut self) -> Element<Self::Message> {

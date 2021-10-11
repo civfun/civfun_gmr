@@ -4,12 +4,14 @@ use anyhow::anyhow;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::panic::panic_any;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, trace};
 
 const CONFIG_KEY: &str = "config";
 const GAME_API_RESPONSE_KEY: &str = "data";
@@ -133,7 +135,6 @@ impl Manager {
             inner.games.clone()
         };
 
-        dbg!("????");
         for game in &games.games {
             if !game.is_user_id_turn(&user_id) {
                 continue;
@@ -153,6 +154,12 @@ impl Manager {
                 .await
                 .unwrap();
 
+            // There's a potential race condition here, with the read() above. I wasn't able to put
+            // the whole thing in one write() lock. Some cryptic error comes up, related to this:
+            // https://blog.rust-lang.org/inside-rust/2019/10/11/AsyncAwait-Not-Send-Error-Improvements.html
+            //
+            // For now this should drop one of the two `rx`'s if two are accidentally made at the
+            // same time.
             {
                 let mut inner = self.inner.write().unwrap();
                 inner.downloads.insert(game_id, Download::Downloading(rx));
@@ -160,6 +167,47 @@ impl Manager {
         }
 
         Ok(Some(())) // TODO: return something useful?
+    }
+
+    pub fn process_downloads(&self) {
+        let games = {
+            let inner = self.inner.read().unwrap();
+            inner.games.clone()
+        };
+
+        for game in &games.games {
+            let mut inner = self.inner.write().unwrap();
+            let mut update_state = None;
+            if let Some(Download::Downloading(ref mut rx)) = inner.downloads.get_mut(&game.game_id)
+            {
+                loop {
+                    let msg = match rx.try_recv() {
+                        Ok(msg) => msg,
+                        Err(TryRecvError::Empty) => break,
+                        Err(err) => panic!("{:?}", err),
+                    };
+                    match msg {
+                        DownloadMessage::Error(e) => {
+                            trace!("error: {}", e)
+                        }
+                        DownloadMessage::Started(size) => {
+                            trace!("started {:?}", size)
+                        }
+                        DownloadMessage::Chunk(percentage, bytes) => {
+                            trace!("chunk got {} bytes {:?}", bytes.len(), percentage)
+                        }
+                        DownloadMessage::Done => {
+                            trace!("done!");
+                            update_state = Some(Download::Complete);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(new_state) = update_state {
+                inner.downloads.insert(game.game_id, new_state);
+            }
+        }
     }
 
     pub fn download_status(&self) -> Vec<Download> {
