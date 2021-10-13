@@ -1,0 +1,10 @@
+[package]
+name = "civ5save"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+thiserror = "1.0.30"
+byteorder = "1.4.3"
+tracing = "0.1.29"
+test-env-log = "0.2.7"

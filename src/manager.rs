@@ -2,9 +2,9 @@ use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UserId}
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::panic::panic_any;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use tokio::sync::mpsc;
@@ -142,15 +142,18 @@ impl Manager {
 
             {
                 let mut inner = self.inner.read().unwrap();
-                if let Some(Download::Downloading(..)) = inner.downloads.get(&game.game_id) {
-                    continue;
+                match inner.downloads.get(&game.game_id) {
+                    None => {}
+                    Some(Download::Idle) => {}
+                    _ => continue,
                 }
             }
 
             let game_id = game.game_id.clone();
+            let path = Self::save_dir()?.join(Self::filename(&game)?);
             let (rx, handle) = self
                 .api()?
-                .get_latest_save_file_bytes(&game_id)
+                .get_latest_save_file_bytes(&game_id, path)
                 .await
                 .unwrap();
 
@@ -167,6 +170,45 @@ impl Manager {
         }
 
         Ok(Some(())) // TODO: return something useful?
+    }
+
+    /// Windows: ~\Documents\My Games\Sid Meier's Civilization 5\Saves\hotseat\
+    /// OS X: ~/Documents/Aspyr/Sid Meier's Civilization 5/Saves/hotseat/
+    /// Linux: ~/.local/share/Aspyr/Sid Meier's Civilization 5/Saves/hotseat/
+    fn save_dir() -> anyhow::Result<PathBuf> {
+        let base_dirs = BaseDirs::new().ok_or(anyhow!("Could not work out basedir."))?;
+        let home = base_dirs.home_dir();
+        let suffix = PathBuf::from("Sid Meier's Civilization 5")
+            .join("Saves")
+            .join("hotseat");
+        // Can't use the `directories` crate because these paths are inconsistent between OS's.
+        let middle = if cfg!(windows) {
+            PathBuf::from("Documents").join("My Games")
+        } else if cfg!(target_os = "macos") {
+            PathBuf::from("Documents").join("Aspyr")
+        } else if cfg!(unix) {
+            PathBuf::from(".local").join("share").join("Aspyr")
+        } else {
+            return Err(anyhow!("Unhandled operating system for save_dir."));
+        };
+        Ok(home.join(middle).join(suffix))
+    }
+
+    fn filename(game: &Game) -> anyhow::Result<PathBuf> {
+        let cleaner_name: String = game
+            .name
+            .chars()
+            .map(|c| match "./\\\"<>|:*?".contains(c) {
+                true => '_',
+                false => c,
+            })
+            .collect();
+        Ok(format!("(civfun {}) {}.Civ5Save", game.game_id, cleaner_name).into())
+    }
+
+    fn expected_save_file(game: &Game) {
+        // Examples:
+        // Casimir III_0028 BC-2320.Civ5Save
     }
 
     pub fn process_downloads(&self) {
@@ -193,8 +235,8 @@ impl Manager {
                         DownloadMessage::Started(size) => {
                             trace!("started {:?}", size)
                         }
-                        DownloadMessage::Chunk(percentage, bytes) => {
-                            trace!("chunk got {} bytes {:?}", bytes.len(), percentage)
+                        DownloadMessage::Chunk(percentage) => {
+                            trace!("Download progress {:?}", percentage);
                         }
                         DownloadMessage::Done => {
                             trace!("done!");

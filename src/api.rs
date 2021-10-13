@@ -5,10 +5,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{Display, Formatter};
-use std::io::Bytes;
+use std::io::{Bytes, Write};
+use std::path::{Path, PathBuf};
+use tempfile::{NamedTempFile, TempPath};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{instrument, trace};
+use tracing::{info, instrument, trace};
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserId(u64);
@@ -116,7 +118,7 @@ impl TryFrom<f32> for Percentage {
 pub enum DownloadMessage {
     Error(String),
     Started(Option<u64>),
-    Chunk(Option<Percentage>, Vec<u8>),
+    Chunk(Option<Percentage>),
     Done,
 }
 
@@ -205,6 +207,7 @@ impl Api {
     pub async fn get_latest_save_file_bytes(
         &self,
         game_id: &GameId,
+        save_path: PathBuf,
     ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
         let s = self.clone();
         let game_id = game_id.clone();
@@ -220,17 +223,21 @@ impl Api {
             let size = response.content_length();
             trace!("Starting download of {:?} bytes.", size);
             tx.send(DownloadMessage::Started(size)).await.unwrap();
+            // let mut data: Vec<u8> = Vec::with_capacity(size.unwrap_or(2_000_000) as usize);
+
             let mut stream = response.bytes_stream();
-            let mut collected = 0;
+            let mut fp = NamedTempFile::new().unwrap(); // TODO: unwrap
+            let mut downloaded = 0;
             while let Some(bytes) = stream.next().await {
-                let bytes = bytes.unwrap().to_vec(); // TODO: unwrap
-                collected += bytes.len();
+                let bytes = bytes.unwrap();
+                downloaded += bytes.len();
+                fp.write_all(&bytes).unwrap(); // TODO: lots of unwrap
                 let percentage =
-                    size.map(|size| (collected as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
-                tx.send(DownloadMessage::Chunk(percentage, bytes))
-                    .await
-                    .unwrap();
+                    size.map(|size| (downloaded as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
+                tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
             }
+            info!("Saving to {:?}", save_path);
+            fp.persist(save_path).unwrap(); // TODO: unwrap
             tx.send(DownloadMessage::Done).await.unwrap();
         });
 
