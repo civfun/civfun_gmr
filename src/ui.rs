@@ -10,6 +10,7 @@ use iced::{
     HorizontalAlignment, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Text,
     TextInput, VerticalAlignment,
 };
+use notify::DebouncedEvent;
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -73,7 +74,9 @@ pub enum Message {
     AuthResponse(Option<UserId>),
     RequestRefresh,
     HasRefreshed(()),
+    StartedWatching(()),
     ProcessDownloads,
+    ProcessSaves,
     AuthKeyInputChanged(String),
     AuthKeySave,
     PlayCiv,
@@ -108,6 +111,22 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
         },
         Message::HasRefreshed,
     )
+}
+
+#[instrument(skip(manager))]
+fn watch_cmd(manager: &Option<Manager>) -> Command<Message> {
+    let manager = match manager {
+        Some(ref m) => m.clone(),
+        None => {
+            warn!("Manager not set while trying to fetch.");
+            return Command::none();
+        }
+    };
+
+    Command::perform(
+        async move { manager.start_watching_saves().await.unwrap() },
+        Message::StartedWatching,
+    ) // TODO: unwrap
 }
 
 async fn authenticate(mut manager: Manager) -> Option<UserId> {
@@ -147,6 +166,7 @@ impl Application for CivFunUi {
                     self.status_text = "Refreshing...".into();
                     return Command::batch([
                         fetch_cmd(&Some(manager.clone())),
+                        watch_cmd(&Some(manager.clone())),
                         Command::perform(authenticate(manager.clone()), AuthResponse),
                     ]);
                 } else {
@@ -166,6 +186,9 @@ impl Application for CivFunUi {
                 self.status_text = "Refreshing...".into();
                 return fetch_cmd(&self.manager);
             }
+            StartedWatching(()) => {
+                debug!("StartedWatching");
+            }
             HasRefreshed(()) => {
                 debug!("HasRefreshed");
                 self.status_text = "".into();
@@ -177,7 +200,12 @@ impl Application for CivFunUi {
             }
             ProcessDownloads => {
                 if let Some(ref mut manager) = self.manager {
-                    manager.process_downloads();
+                    manager.process_downloads().unwrap();
+                }
+            }
+            ProcessSaves => {
+                if let Some(ref mut manager) = self.manager {
+                    manager.process_new_saves().unwrap();
                 }
             }
             // Refreshed(Err(err)) => {
@@ -215,6 +243,7 @@ impl Application for CivFunUi {
         Subscription::batch([
             time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh),
             time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessDownloads),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessSaves),
         ])
     }
 

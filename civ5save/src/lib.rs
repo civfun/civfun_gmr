@@ -7,32 +7,6 @@ use std::io;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use tracing::{debug, instrument, trace};
 
-// use thiserror::Error;
-
-// #[derive(Error, Debug)]
-// pub enum Error {
-//     #[error("Invalid header in save.")]
-//     BadHeader,
-//
-//     #[error("Unknown player type {0}.")]
-//     UnknownPlayerType(u32),
-//
-//     #[error("IoError")]
-//     IoError(
-//         #[from]
-//         #[backtrace]
-//         io::Error,
-//     ),
-//
-//     #[error("Utf8 Error")]
-//     Utf8Error(
-//         #[from]
-//         #[backtrace]
-//         std::str::Utf8Error,
-//     ),
-// }
-
-// type Result<T> = std::result::Result<T, Error>;
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 type Error = anyhow::Error;
 
@@ -96,8 +70,6 @@ struct Header {
 struct Player {
     name: String,
     player_type: PlayerType,
-    // civ: String,
-    // leader: String,
 }
 
 struct Civ5SaveReader<'a> {
@@ -150,8 +122,6 @@ impl<'a> Civ5SaveReader<'a> {
             players.push(Player {
                 name: player_names[i].clone(),
                 player_type: player_types[i].clone(),
-                // civ: civs[i].clone(),
-                // leader: leaders[i].clone(),
             })
         }
 
@@ -332,8 +302,12 @@ mod tests {
 
     #[test_env_log::test]
     fn sanity() {
+        let save = load("saves/Casimir III_0005 BC-3700.Civ5Save".into());
+        assert_eq!(save.header.turn, 5);
         let save = load("saves/Casimir III_0028 BC-2320.Civ5Save".into());
         assert_eq!(save.header.turn, 28);
+        let save = load("saves/Casimir III_0029 BC-2260.Civ5Save".into());
+        assert_eq!(save.header.turn, 29);
     }
 
     #[test_env_log::test]
@@ -369,9 +343,9 @@ mod tests {
                 if a == b {
                     continue;
                 }
-                info!(?a, "Loading");
+                debug!(?a, "Loading");
                 let save_a = load(a);
-                info!(?b, "Loading");
+                debug!(?b, "Loading");
                 let save_b = load(b);
                 let diff = save_a.difference_score(&save_b).unwrap();
                 info!(?a, ?b, ?diff, "Comparing");
