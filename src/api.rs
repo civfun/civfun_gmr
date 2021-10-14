@@ -207,11 +207,12 @@ impl Api {
     pub async fn get_latest_save_file_bytes(
         &self,
         game_id: &GameId,
-        save_path: PathBuf,
+        save_path: &PathBuf,
     ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
         let s = self.clone();
         let game_id = game_id.clone();
         let (tx, rx) = mpsc::channel(32);
+        let save_path = save_path.clone();
         let handle = tokio::spawn(async move {
             let response = s
                 .get(
@@ -223,21 +224,20 @@ impl Api {
             let size = response.content_length();
             trace!("Starting download of {:?} bytes.", size);
             tx.send(DownloadMessage::Started(size)).await.unwrap();
-            // let mut data: Vec<u8> = Vec::with_capacity(size.unwrap_or(2_000_000) as usize);
 
             let mut stream = response.bytes_stream();
-            let mut fp = NamedTempFile::new().unwrap(); // TODO: unwrap
+            let mut temp_file = NamedTempFile::new().unwrap(); // TODO: unwrap
             let mut downloaded = 0;
             while let Some(bytes) = stream.next().await {
                 let bytes = bytes.unwrap();
                 downloaded += bytes.len();
-                fp.write_all(&bytes).unwrap(); // TODO: lots of unwrap
+                temp_file.write_all(&bytes).unwrap(); // TODO: lots of unwrap
                 let percentage =
                     size.map(|size| (downloaded as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
                 tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
             }
             info!("Saving to {:?}", save_path);
-            fp.persist(save_path).unwrap(); // TODO: unwrap
+            temp_file.persist(save_path).unwrap(); // TODO: unwrap
             tx.send(DownloadMessage::Done).await.unwrap();
         });
 

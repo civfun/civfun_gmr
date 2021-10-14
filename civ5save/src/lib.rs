@@ -72,7 +72,7 @@ pub struct Player {
     player_type: PlayerType,
 }
 
-struct Civ5SaveReader<'a> {
+pub struct Civ5SaveReader<'a> {
     cursor: Cursor<&'a [u8]>,
     chunks: Vec<Chunk>,
 }

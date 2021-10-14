@@ -200,7 +200,7 @@ impl Application for CivFunUi {
             }
             ProcessDownloads => {
                 if let Some(ref mut manager) = self.manager {
-                    manager.process_downloads().unwrap();
+                    manager.process_downloads();
                 }
             }
             ProcessSaves => {

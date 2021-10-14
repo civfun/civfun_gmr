@@ -2,12 +2,14 @@ use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UserId}
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
-use civ5save::Civ5Save;
+use civ5save::{Civ5Save, Civ5SaveReader};
 use directories::BaseDirs;
 use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::Duration;
@@ -52,9 +54,9 @@ struct GameInfo<'a> {
 struct Inner {
     config: Config,
     games: GetGamesAndPlayers,
-    downloads: HashMap<GameId, Download>,
-    new_files: Vec<String>,
-    parsed: HashMap<GameId, Civ5Save>,
+    download_state: HashMap<GameId, Download>,
+    new_files_seen: Vec<String>,
+    parsed_saves: HashMap<GameId, Civ5Save>,
 }
 
 impl Inner {
@@ -64,8 +66,8 @@ impl Inner {
             .iter()
             .map(|game| GameInfo {
                 game,
-                download: self.downloads.get(&game.game_id),
-                parsed: self.parsed.get(&game.game_id),
+                download: self.download_state.get(&game.game_id),
+                parsed: self.parsed_saves.get(&game.game_id),
             })
             .collect()
     }
@@ -186,7 +188,7 @@ impl Manager {
 
             {
                 let mut inner = self.inner.read().unwrap();
-                match inner.downloads.get(&game.game_id) {
+                match inner.download_state.get(&game.game_id) {
                     None => {}
                     Some(Download::Idle) => {}
                     _ => continue,
@@ -197,9 +199,8 @@ impl Manager {
             let path = Self::save_dir()?.join(Self::filename(&game)?);
             let (rx, handle) = self
                 .api()?
-                .get_latest_save_file_bytes(&game_id, path)
-                .await
-                .unwrap();
+                .get_latest_save_file_bytes(&game_id, &path)
+                .await?;
 
             // There's a potential race condition here, with the read() above. I wasn't able to put
             // the whole thing in one write() lock. Some cryptic error comes up, related to this:
@@ -209,11 +210,30 @@ impl Manager {
             // same time.
             {
                 let mut inner = self.inner.write().unwrap();
-                inner.downloads.insert(game_id, Download::Downloading(rx));
+
+                // Save the file into the DB because:
+                // 1) The user might delete the file in the future
+                // 2) Be able to analyse the file and compare when the user uploads their turn.
+                let mut fp = File::open(&path)?;
+                let mut data = Vec::with_capacity(1_000_000);
+                fp.read(&mut data)?;
+                self.db
+                    .insert(Self::saved_bytes_db_key(&game.game_id), data.clone())?;
+
+                // Analyse the save
+                Civ5SaveReader::new(&data).parse()?;
+
+                inner
+                    .download_state
+                    .insert(game_id, Download::Downloading(rx));
             }
         }
 
         Ok(Some(())) // TODO: return something useful?
+    }
+
+    fn saved_bytes_db_key(game_id: &GameId) -> String {
+        format!("saved-bytes-{}", game_id)
     }
 
     /// Windows: ~\Documents\My Games\Sid Meier's Civilization 5\Saves\hotseat\
@@ -259,7 +279,8 @@ impl Manager {
         for game in &games.games {
             let mut inner = self.inner.write().unwrap();
             let mut update_state = None;
-            if let Some(Download::Downloading(ref mut rx)) = inner.downloads.get_mut(&game.game_id)
+            if let Some(Download::Downloading(ref mut rx)) =
+                inner.download_state.get_mut(&game.game_id)
             {
                 loop {
                     let msg = match rx.try_recv() {
@@ -286,7 +307,7 @@ impl Manager {
                 }
             }
             if let Some(new_state) = update_state {
-                inner.downloads.insert(game.game_id, new_state);
+                inner.download_state.insert(game.game_id, new_state);
             }
         }
     }
@@ -318,7 +339,7 @@ impl Manager {
                         if let DebouncedEvent::Create(path) = event {
                             let mut inner = s.inner.write().unwrap();
                             let filename = path.file_name().unwrap().to_str().unwrap().into();
-                            inner.new_files.push(filename);
+                            inner.new_files_seen.push(filename);
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -339,8 +360,8 @@ impl Manager {
         // Atomically get the files out of the inner struct.
         let files = {
             let mut inner = self.inner.write().unwrap();
-            let new_files = inner.new_files.clone();
-            inner.new_files = vec![];
+            let new_files = inner.new_files_seen.clone();
+            inner.new_files_seen = vec![];
             new_files
         };
 
@@ -366,9 +387,7 @@ impl Manager {
     fn check_save(&self, filename: &str) -> Result<()> {
         let turn = Self::turn_from_filename(filename)?;
         let inner = self.inner.write().unwrap();
-        for game in inner.my_games()? {
-            trace!(?turn, ?game.)
-        }
+        for game in inner.my_games()? {}
 
         Ok(())
     }
