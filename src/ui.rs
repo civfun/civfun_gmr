@@ -1,7 +1,7 @@
 use crate::style::ActionButtonStyle;
 use crate::{style, TITLE, VERSION};
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
-use civfun_gmr::manager::{AuthState, Config, Manager};
+use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
 use iced::container::{Style, StyleSheet};
 use iced::window::Mode;
 use iced::{
@@ -63,6 +63,7 @@ pub struct CivFunUi {
 
     actions: Actions,
     enter_auth_key: EnterAuthKey,
+    games: Games,
 
     scroll_state: scrollable::State,
     refresh_started_at: Option<Instant>,
@@ -248,14 +249,13 @@ impl Application for CivFunUi {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        // TODO: Turn content to scrollable
-
         let Self {
             manager,
             screen,
             actions,
             scroll_state,
             enter_auth_key,
+            games,
             ..
         } = self;
 
@@ -275,8 +275,11 @@ impl Application for CivFunUi {
         let content: Element<Message> = match screen {
             Screen::NothingYet => Text::new("Something funny is going on!").into(),
             Screen::AuthKeyInput => enter_auth_key.view().into(),
-            Screen::Games => Text::new("g\na\n\n\n\n\nmes\n\n\n\n\n li\nst").into(),
-            Screen::Settings => Text::new("Settings").into(),
+            Screen::Games => match &self.manager {
+                Some(m) => games.view(m.games().as_slice()),
+                None => Text::new("No manager yet!").into(),
+            },
+            Screen::Settings => Text::new("TODO Settings").into(),
             Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
         };
 
@@ -294,14 +297,6 @@ impl Application for CivFunUi {
 // TODO: Result<Manager> (not anyhow::Result because Message needs to be Clone)
 async fn prepare_manager() -> Manager {
     Manager::new().unwrap() // TODO: unwrap
-}
-
-fn games_view<'a>(manager: &Manager) -> Element<Message> {
-    let mut c = Column::new();
-    for game in manager.games() {
-        c = c.push(Text::new(format!("{}", &game.name)));
-    }
-    c.into()
 }
 
 #[derive(Default)]
@@ -339,6 +334,19 @@ impl Actions {
             .push(status.width(Length::Fill))
             .push(settings_button.width(Length::Shrink))
             .into()
+    }
+}
+
+#[derive(Default)]
+struct Games {}
+
+impl Games {
+    fn view(&mut self, games: &[GameInfo]) -> Element<Message> {
+        let column = Column::new();
+        for info in games {
+            // column.push(Text::new(info.game.name.clone()));
+        }
+        column.into()
     }
 }
 

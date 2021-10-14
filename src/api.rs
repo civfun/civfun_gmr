@@ -204,11 +204,13 @@ impl Api {
             .await
     }
 
+    #[instrument(skip(self))]
     pub async fn get_latest_save_file_bytes(
         &self,
         game_id: &GameId,
         save_path: &PathBuf,
     ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
+        trace!("Starting download.");
         let s = self.clone();
         let game_id = game_id.clone();
         let (tx, rx) = mpsc::channel(32);
@@ -222,7 +224,7 @@ impl Api {
                 .await
                 .unwrap(); // TODO: unwrap
             let size = response.content_length();
-            trace!("Starting download of {:?} bytes.", size);
+            trace!(?size);
             tx.send(DownloadMessage::Started(size)).await.unwrap();
 
             let mut stream = response.bytes_stream();
@@ -236,9 +238,10 @@ impl Api {
                     size.map(|size| (downloaded as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
                 tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
             }
-            info!("Saving to {:?}", save_path);
+            info!(?save_path, "Saving to disk.");
             temp_file.persist(save_path).unwrap(); // TODO: unwrap
             tx.send(DownloadMessage::Done).await.unwrap();
+            trace!("Done.");
         });
 
         Ok((rx, handle))

@@ -43,11 +43,11 @@ pub struct Config {
     auth_state: AuthState,
 }
 
-#[derive(Debug)]
-struct GameInfo<'a> {
-    game: &'a Game,
-    download: Option<&'a Download>,
-    parsed: Option<&'a Civ5Save>,
+#[derive(Debug, Clone)]
+pub struct GameInfo {
+    pub game: Game,
+    pub download: Option<Download>,
+    pub parsed: Option<Civ5Save>,
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +55,7 @@ struct Inner {
     config: Config,
     games: GetGamesAndPlayers,
     download_state: HashMap<GameId, Download>,
+    download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     new_files_seen: Vec<String>,
     parsed_saves: HashMap<GameId, Civ5Save>,
 }
@@ -65,9 +66,9 @@ impl Inner {
             .games
             .iter()
             .map(|game| GameInfo {
-                game,
-                download: self.download_state.get(&game.game_id),
-                parsed: self.parsed_saves.get(&game.game_id),
+                game: game.clone(),
+                download: self.download_state.get(&game.game_id).cloned(),
+                parsed: self.parsed_saves.get(&game.game_id).cloned(),
             })
             .collect()
     }
@@ -86,10 +87,10 @@ impl Inner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Download {
     Idle,
-    Downloading(mpsc::Receiver<DownloadMessage>),
+    Downloading,
     Complete,
 }
 
@@ -168,13 +169,13 @@ impl Manager {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn start_downloads(&mut self) -> Result<Option<()>> {
         // If we don't have a user_id, don't bother trying.
         let user_id = match self.user_id() {
             None => return Ok(None),
             Some(u) => u,
         };
-
         let games = {
             let inner = self.inner.read().unwrap();
             inner.games.clone()
@@ -202,30 +203,26 @@ impl Manager {
                 .get_latest_save_file_bytes(&game_id, &path)
                 .await?;
 
-            // There's a potential race condition here, with the read() above. I wasn't able to put
-            // the whole thing in one write() lock. Some cryptic error comes up, related to this:
-            // https://blog.rust-lang.org/inside-rust/2019/10/11/AsyncAwait-Not-Send-Error-Improvements.html
-            //
-            // For now this should drop one of the two `rx`'s if two are accidentally made at the
-            // same time.
             {
                 let mut inner = self.inner.write().unwrap();
 
                 // Save the file into the DB because:
                 // 1) The user might delete the file in the future
                 // 2) Be able to analyse the file and compare when the user uploads their turn.
+                trace!(?path, "Placing save file into db.");
                 let mut fp = File::open(&path)?;
                 let mut data = Vec::with_capacity(1_000_000);
-                fp.read(&mut data)?;
+                fp.read_to_end(&mut data)?;
                 self.db
                     .insert(Self::saved_bytes_db_key(&game.game_id), data.clone())?;
 
                 // Analyse the save
-                Civ5SaveReader::new(&data).parse()?;
+                trace!(data_len = ?data.len(), "Analysing save.");
+                let civ5save = Civ5SaveReader::new(&data).parse()?;
+                trace!(?civ5save);
 
-                inner
-                    .download_state
-                    .insert(game_id, Download::Downloading(rx));
+                inner.download_state.insert(game_id, Download::Downloading);
+                inner.download_rx.insert(game_id, rx);
             }
         }
 
@@ -279,9 +276,9 @@ impl Manager {
         for game in &games.games {
             let mut inner = self.inner.write().unwrap();
             let mut update_state = None;
-            if let Some(Download::Downloading(ref mut rx)) =
-                inner.download_state.get_mut(&game.game_id)
-            {
+            if let Some(Download::Downloading) = inner.download_state.get_mut(&game.game_id) {
+                // TODO: This is probably a bug if it panics.
+                let rx = inner.download_rx.get_mut(&game.game_id).unwrap();
                 loop {
                     let msg = match rx.try_recv() {
                         Ok(msg) => msg,
@@ -301,6 +298,7 @@ impl Manager {
                         DownloadMessage::Done => {
                             trace!("Done!");
                             update_state = Some(Download::Complete);
+                            inner.download_rx.remove(&game.game_id);
                             break;
                         }
                     }
@@ -457,7 +455,9 @@ impl Manager {
         }
     }
 
-    pub fn games(&self) -> Vec<Game> {
-        self.inner.read().unwrap().games.games.clone()
+    pub fn games(&self) -> Vec<GameInfo> {
+        let inner = self.inner.read().unwrap();
+        let games = inner.games();
+        games.clone()
     }
 }
