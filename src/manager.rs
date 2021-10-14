@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, trace_span, warn};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -205,22 +205,6 @@ impl Manager {
 
             {
                 let mut inner = self.inner.write().unwrap();
-
-                // Save the file into the DB because:
-                // 1) The user might delete the file in the future
-                // 2) Be able to analyse the file and compare when the user uploads their turn.
-                trace!(?path, "Placing save file into db.");
-                let mut fp = File::open(&path)?;
-                let mut data = Vec::with_capacity(1_000_000);
-                fp.read_to_end(&mut data)?;
-                self.db
-                    .insert(Self::saved_bytes_db_key(&game.game_id), data.clone())?;
-
-                // Analyse the save
-                trace!(data_len = ?data.len(), "Analysing save.");
-                let civ5save = Civ5SaveReader::new(&data).parse()?;
-                trace!(?civ5save);
-
                 inner.download_state.insert(game_id, Download::Downloading);
                 inner.download_rx.insert(game_id, rx);
             }
@@ -274,6 +258,9 @@ impl Manager {
         };
 
         for game in &games.games {
+            let span = trace_span!("", id = ?game.game_id);
+            let _enter = span.enter();
+
             let mut inner = self.inner.write().unwrap();
             let mut update_state = None;
             if let Some(Download::Downloading) = inner.download_state.get_mut(&game.game_id) {
@@ -295,8 +282,26 @@ impl Manager {
                         DownloadMessage::Chunk(percentage) => {
                             trace!(?percentage, "Download progress");
                         }
-                        DownloadMessage::Done => {
+                        DownloadMessage::Done(path) => {
                             trace!("Done!");
+
+                            // Save the file into the DB because:
+                            // 1) The user might delete the file in the future
+                            // 2) Be able to analyse the file and compare when the user uploads their turn.
+                            trace!(?path, "Placing save file into db.");
+                            let mut fp = File::open(&path).unwrap();
+                            let mut data = Vec::with_capacity(1_000_000);
+                            fp.read_to_end(&mut data).unwrap();
+                            self.db
+                                .insert(Self::saved_bytes_db_key(&game.game_id), data.clone())
+                                .unwrap();
+
+                            // Analyse the save
+                            trace!(data_len = ?data.len(), "Analysing save.");
+                            let civ5save = Civ5SaveReader::new(&data).parse().unwrap();
+                            trace!(?civ5save);
+                            inner.parsed_saves.insert(game.game_id.clone(), civ5save);
+
                             update_state = Some(Download::Complete);
                             inner.download_rx.remove(&game.game_id);
                             break;

@@ -119,7 +119,7 @@ pub enum DownloadMessage {
     Error(String),
     Started(Option<u64>),
     Chunk(Option<Percentage>),
-    Done,
+    Done(PathBuf),
 }
 
 #[derive(Clone)]
@@ -239,8 +239,8 @@ impl Api {
                 tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
             }
             info!(?save_path, "Saving to disk.");
-            temp_file.persist(save_path).unwrap(); // TODO: unwrap
-            tx.send(DownloadMessage::Done).await.unwrap();
+            temp_file.persist(&save_path).unwrap(); // TODO: unwrap
+            tx.send(DownloadMessage::Done(save_path)).await.unwrap();
             trace!("Done.");
         });
 
