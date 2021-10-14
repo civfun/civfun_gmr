@@ -52,7 +52,7 @@ impl Debug for Chunk {
 }
 
 #[derive(Clone, Debug)]
-struct Header {
+pub struct Header {
     save: u32,
     game: String,
     build: String,
@@ -67,7 +67,7 @@ struct Header {
 }
 
 #[derive(Clone, Debug)]
-struct Player {
+pub struct Player {
     name: String,
     player_type: PlayerType,
 }
@@ -253,9 +253,9 @@ impl<'a> Civ5SaveReader<'a> {
 }
 
 #[derive(Clone, Debug)]
-struct Civ5Save {
-    header: Header,
-    players: Vec<Player>,
+pub struct Civ5Save {
+    pub header: Header,
+    pub players: Vec<Player>,
     chunks: Vec<Chunk>,
 }
 

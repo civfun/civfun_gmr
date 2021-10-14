@@ -229,10 +229,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "civ5save"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "pretty-hex",
+ "tracing",
+]
+
+[[package]]
 name = "civfun_gmr"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "civ5save",
  "clap",
  "directories",
  "iced",
@@ -2252,6 +2263,12 @@ name = "ppv-lite86"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac74c624d6b2d21f425f752262f42188365d7b8ff1aff74c82e45136510a4857"
+
+[[package]]
+name = "pretty-hex"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc5c99d529f0d30937f6f4b8a86d988047327bb88d04d2c4afc356de74722131"
 
 [[package]]
 name = "proc-macro-crate"

@@ -2,6 +2,7 @@ use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UserId}
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
+use civ5save::Civ5Save;
 use directories::BaseDirs;
 use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -40,12 +41,47 @@ pub struct Config {
     auth_state: AuthState,
 }
 
+#[derive(Debug)]
+struct GameInfo<'a> {
+    game: &'a Game,
+    download: Option<&'a Download>,
+    parsed: Option<&'a Civ5Save>,
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     config: Config,
     games: GetGamesAndPlayers,
     downloads: HashMap<GameId, Download>,
     new_files: Vec<String>,
+    parsed: HashMap<GameId, Civ5Save>,
+}
+
+impl Inner {
+    fn games(&self) -> Vec<GameInfo> {
+        self.games
+            .games
+            .iter()
+            .map(|game| GameInfo {
+                game,
+                download: self.downloads.get(&game.game_id),
+                parsed: self.parsed.get(&game.game_id),
+            })
+            .collect()
+    }
+
+    fn my_games(&self) -> Result<Vec<GameInfo>> {
+        let user_id = match &self.config.auth_state {
+            AuthState::AuthResult(Some(user_id)) => user_id,
+            _ => return Err(anyhow!("my_games requested without a valid auth state.")),
+        };
+
+        Ok(self
+            .games()
+            .into_iter()
+            .filter(|g| g.game.is_user_id_turn(user_id))
+            .collect())
+    }
 }
 
 #[derive(Debug)]
@@ -142,6 +178,7 @@ impl Manager {
             inner.games.clone()
         };
 
+        // TODO: Use inner.my_games()
         for game in &games.games {
             if !game.is_user_id_turn(&user_id) {
                 continue;
@@ -232,7 +269,7 @@ impl Manager {
                     };
                     match msg {
                         DownloadMessage::Error(e) => {
-                            trace!("error: {}", e)
+                            error!(?e, "Download");
                         }
                         DownloadMessage::Started(size) => {
                             trace!(?size, "Started");
@@ -241,7 +278,7 @@ impl Manager {
                             trace!(?percentage, "Download progress");
                         }
                         DownloadMessage::Done => {
-                            trace!("done!");
+                            trace!("Done!");
                             update_state = Some(Download::Complete);
                             break;
                         }
@@ -308,7 +345,7 @@ impl Manager {
         };
 
         for file in files {
-            self.check_save(file).unwrap(); // TODO: unwrap
+            self.check_save(&file).unwrap(); // TODO: unwrap
         }
 
         Ok(())
@@ -322,15 +359,28 @@ impl Manager {
     ///  - Verify the difference between the downloaded save and the new file is low.
     /// If there's more than one, there's something really wrong, so abort for now.
     /// Otherwise:
+    ///  - Move the originally downloaded file to `civfun Archive/[game_id]_[turn]_[dn]_[original name]`.
     ///  - Copy the file bytes into the DB and queue for upload.
-    ///  - Move the file to `civfun Archive` with a name like `[game_id]_[turn]_[up]_[original name]`
-    fn check_save(&self, file: String) -> Result<()> {
+    ///  - Move the uploaded file to `civfun Archive/[game_id]_[turn]_[up]_[original name]`
+    #[instrument(skip(self))]
+    fn check_save(&self, filename: &str) -> Result<()> {
+        let turn = Self::turn_from_filename(filename)?;
+        let inner = self.inner.write().unwrap();
+        for game in inner.my_games()? {
+            trace!(?turn, ?game.)
+        }
+
+        Ok(())
+    }
+
+    fn turn_from_filename(filename: &str) -> Result<u32> {
         // TODO: once_cell
         let re = Regex::new(r"(?P<leader>.*?)_(?P<turn>\d{4}) (?P<year>.*?)\.Civ5Save").unwrap();
-        let captures = re.captures(&file).unwrap(); // TODO: unwrap
+        let captures = re.captures(&filename).unwrap(); // TODO: unwrap
         trace!(?captures);
-        let turn = captures.name("turn").unwrap();
-        Ok(())
+        let turn = captures.name("turn").unwrap().as_str();
+        let turn: u32 = turn.parse().unwrap();
+        Ok(turn)
     }
 
     pub fn load_config(&mut self) -> Result<()> {
