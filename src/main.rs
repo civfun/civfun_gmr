@@ -1,6 +1,10 @@
+use clap::{AppSettings, Clap};
+
+mod style;
 mod ui;
 
-use clap::{AppSettings, Clap};
+pub const TITLE: &str = "civ.fun's Multiplayer Robot";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clap)]
 #[clap(setting = AppSettings::ColoredHelp)]
