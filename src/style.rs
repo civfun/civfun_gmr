@@ -64,6 +64,10 @@ pub fn steam_icon(size: u16) -> Text {
     icon(FA_BRANDS_ICONS, '', size)
 }
 
+pub fn done_icon(size: u16) -> Text {
+    icon(FA_SOLID_ICONS, '', size)
+}
+
 fn text_colour() -> Color {
     Color::from_rgb(0.9, 0.9, 1.0)
 }

@@ -1,4 +1,4 @@
-use crate::style::ActionButtonStyle;
+use crate::style::{title, ActionButtonStyle};
 use crate::{style, TITLE, VERSION};
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
 use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
@@ -7,8 +7,9 @@ use iced::svg::Handle;
 use iced::window::Mode;
 use iced::{
     button, container, executor, scrollable, text_input, time, window, Align, Application,
-    Background, Button, Clipboard, Color, Column, Command, Container, Element, Font, HorizontalAlignment,
-    Length, Row, Rule, Scrollable, Settings, Space, Subscription, Svg, Text, TextInput, VerticalAlignment,
+    Background, Button, Clipboard, Color, Column, Command, Container, Element, Font,
+    HorizontalAlignment, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Svg, Text,
+    TextInput, VerticalAlignment,
 };
 use notify::DebouncedEvent;
 use tokio::task::spawn_blocking;
@@ -34,7 +35,6 @@ enum Screen {
     Error(String),
     AuthKeyInput,
     Games,
-    Settings,
 }
 
 impl Screen {
@@ -56,19 +56,20 @@ impl Default for Screen {
 #[derive(Default)]
 pub struct CivFunUi {
     screen: Screen,
+    // settings_visible is not part of Screen so that screen can change while the settings are showing.
+    settings_visible: bool,
 
     err: Option<anyhow::Error>,
     status_text: String,
     manager: Option<Manager>,
 
     actions: Actions,
+    settings: UiSettings,
     enter_auth_key: EnterAuthKey,
     games: Games,
 
     scroll_state: scrollable::State,
     refresh_started_at: Option<Instant>,
-
-    actions: Actions,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +85,7 @@ pub enum Message {
     AuthKeySave,
     PlayCiv,
     ShowSettings,
+    HideSettings,
 }
 
 // TODO: Return Result<> (not anyhow::Result)
@@ -237,7 +239,8 @@ impl Application for CivFunUi {
                 // TODO: DX version from settings.
                 open::that("steam://rungameid/8930//%5Cdx9").unwrap(); // TODO: unwrap
             }
-            ShowSettings => self.screen = Screen::Settings,
+            ShowSettings => self.settings_visible = true,
+            CloseSettings => self.settings_visible = false,
         }
         Command::none()
     }
@@ -251,6 +254,32 @@ impl Application for CivFunUi {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
+        let Self {
+            manager,
+            screen,
+            actions,
+            settings,
+            settings_visible,
+            scroll_state,
+            enter_auth_key,
+            games,
+            ..
+        } = self;
+
+        let mut content = match screen {
+            Screen::NothingYet => Text::new("Something funny is going on!").into(),
+            Screen::AuthKeyInput => enter_auth_key.view(),
+            Screen::Games => match &self.manager {
+                Some(m) => games.view(m.games().as_slice()),
+                None => Text::new("No manager yet!").into(),
+            },
+            Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
+        };
+
+        if *settings_visible {
+            content = settings.view();
+        }
+
         // TODO: Turn content to scrollable
         // let content = Scrollable::new(&mut self.scroll)
         //     .width(Length::Fill)
@@ -259,10 +288,12 @@ impl Application for CivFunUi {
 
         // let mut actions = Actions::default();
 
-        let layout = Column::new()
-            .push(title())
-            .push(self.actions.view())
-            .push(content());
+        let mut layout = Column::new();
+        layout = layout.push(title());
+        if !*settings_visible && screen.should_show_actions() {
+            layout = layout.push(self.actions.view());
+        }
+        layout = layout.push(content);
 
         let outside = Container::new(layout)
             .width(Length::Fill)
@@ -272,49 +303,29 @@ impl Application for CivFunUi {
         return outside.into();
         // return mock_view(&mut self.actions);
 
-        let Self {
-            manager,
-            screen,
-            actions,
-            scroll_state,
-            enter_auth_key,
-            games,
-            ..
-        } = self;
-
-        let mut layout = Column::new()
-            .width(Length::Fill)
-            .height(Length::Shrink)
-            .size(30)
-            .color(text_colour())
-            .horizontal_alignment(HorizontalAlignment::Left)
-            .vertical_alignment(VerticalAlignment::Top);
-            .height(Length::Fill)
-            .padding(10)
-            .push(style::title())
-            .push(Space::new(Length::Fill, Length::Units(10)));
-
-        if screen.should_show_actions() {
-            layout = layout
-                .push(actions.view())
-                .push(Space::new(Length::Fill, Length::Units(10)));
-        }
-
-        let content: Element<Message> = match screen {
-            Screen::NothingYet => Text::new("Something funny is going on!").into(),
-            Screen::AuthKeyInput => enter_auth_key.view().into(),
-            Screen::Games => match &self.manager {
-                Some(m) => games.view(m.games().as_slice()),
-                None => Text::new("No manager yet!").into(),
-            },
-            Screen::Settings => Text::new("TODO Settings").into(),
-            Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
-        };
-
-        // Force full width of the content. Height should be default for scrolling to work.
-        let content = Container::new(content).width(Length::Fill);
-        let content = Scrollable::new(scroll_state).push(content);
-        layout.push(content).into()
+        // let mut layout = Column::new()
+        //     .width(Length::Fill)
+        //     .height(Length::Shrink)
+        //     .size(30)
+        //     .color(text_colour())
+        //     .horizontal_alignment(HorizontalAlignment::Left)
+        //     .vertical_alignment(VerticalAlignment::Top)
+        //     .height(Length::Fill)
+        //     .padding(10)
+        //     .push(style::title())
+        //     .push(Space::new(Length::Fill, Length::Units(10)));
+        //
+        // if screen.should_show_actions() {
+        //     layout = layout
+        //         .push(actions.view())
+        //         .push(Space::new(Length::Fill, Length::Units(10)));
+        // }
+        //
+        //
+        // // Force full width of the content. Height should be default for scrolling to work.
+        // let content = Container::new(content).width(Length::Fill);
+        // let content = Scrollable::new(scroll_state).push(content);
+        // layout.push(content).into()
     }
 
     fn background_color(&self) -> Color {
@@ -342,41 +353,46 @@ impl Actions {
         .on_press(Message::PlayCiv)
         .style(ActionButtonStyle);
 
-        let content: Element<Self::Message> = if let Some(err) = &self.err {
-            Text::new(format!("Error: {:?}", err)).into()
-        } else {
-            if self.has_auth_key == Yes {
-                // games_view(&self.manager)
-                Text::new("").into()
-            } else if self.has_auth_key == No {
-                let message = Text::new("no auth key pls enter");
-                let input = TextInput::new(
-                    &mut self.auth_key_input_state,
-                    "Type something...",
-                    &self.auth_key_input_value,
-                    Message::AuthKeyInputChanged,
-                )
-                .padding(10)
-                .size(20);
-        let status = Text::new("Updating...")
-            .vertical_alignment(VerticalAlignment::Center)
-            .horizontal_alignment(HorizontalAlignment::Center);
-
-        let settings_button = Button::new(
+        let right_button = Button::new(
             &mut self.settings_button_state,
             style::button_row(Some(style::cog_icon(20)), None),
         )
         .on_press(Message::ShowSettings)
         .style(ActionButtonStyle);
 
-        // let settings_button: Button<Message> =
-        //     Button::new(&mut self.settings_button_state, hmm.into()).into();
+        // let content: Element<Self::Message> = if let Some(err) = &self.err {
+        //     Text::new(format!("Error: {:?}", err)).into()
+        // } else {
+        //     if self. == Yes {
+        //         // games_view(&self.manager)
+        //         Text::new("").into()
+        //     } else if self.has_auth_key == No {
+        //         let message = Text::new("no auth key pls enter");
+        //         let input = TextInput::new(
+        //             &mut self.auth_key_input_state,
+        //             "Type something...",
+        //             &self.auth_key_input_value,
+        //             Message::AuthKeyInputChanged,
+        //         )
+        //         .padding(10)
+        //         .size(20);
+        //         let status = Text::new("Updating...")
+        //             .vertical_alignment(VerticalAlignment::Center)
+        //             .horizontal_alignment(HorizontalAlignment::Center);
+        //
+        //         // let settings_button: Button<Message> =
+        //         //     Button::new(&mut self.settings_button_state, hmm.into()).into();
+        //
+        //     }
+        // };
+
+        let status = Text::new("testing");
 
         Row::new()
             .height(Length::Units(40))
             .push(start_button.width(Length::Shrink))
             .push(status.width(Length::Fill))
-            .push(settings_button.width(Length::Shrink))
+            .push(right_button.width(Length::Shrink))
             .into()
     }
 }
@@ -443,92 +459,21 @@ impl EnterAuthKey {
     }
 }
 
-// TODO: Result<Manager> (not anyhow::Result because Message needs to be Clone)
-async fn prepare_manager() -> Manager {
-    Manager::new().unwrap() // TODO: unwrap
-}
-
-struct Dark;
-
-impl container::StyleSheet for Dark {
-    fn style(&self) -> Style {
-        Style {
-            background: Some(Color::from_rgb(0.168, 0.243, 0.313).into()),
-            ..Default::default()
-        }
-    }
-}
-
-fn games_view<'a>(manager: &Manager) -> Element<Message> {
-    let mut c = Column::new();
-    c = c.push(Text::new("ASDF"));
-    c = c.push(Text::new("ASDF2"));
-    // for game in manager.games() {
-    //     c = c.push(Text::new(format!("ASDF{}", &game.name)));
-    // }
-    c.into()
-}
-
-// fn mock_view(actions: &'static mut Actions) -> Element<'static, Message> {}
-
-fn content() -> Element<'static, Message> {
-    Text::new("content").into()
-}
-
-fn title() -> Element<'static, Message> {
-    Text::new(TITLE)
-        .width(Length::Fill)
-        .height(Length::Shrink)
-        .size(30)
-        .color(text_colour())
-        .horizontal_alignment(HorizontalAlignment::Left)
-        .vertical_alignment(VerticalAlignment::Top)
-        .into()
-}
-
-fn text_colour() -> Color {
-    Color::from_rgb(0.9, 0.9, 1.0)
-}
-
 #[derive(Default)]
-struct Actions {
-    start_button_state: button::State,
-    settings_button_state: button::State,
+struct UiSettings {
+    close_settings_button_state: button::State,
+    open_folder_button_state: button::State,
 }
 
-const ICONS: Font = Font::External {
-    name: "Icons",
-    bytes: include_bytes!("../fonts/ionicons.ttf"),
-};
-
-impl Actions {
+impl UiSettings {
     fn view(&mut self) -> Element<Message> {
-        let start_button = Button::new(&mut self.start_button_state, Text::new("Play"));
-        let status = Text::new("Updating...")
-            .vertical_alignment(VerticalAlignment::Center)
-            .horizontal_alignment(HorizontalAlignment::Center);
+        let close_button = Button::new(
+            &mut self.close_settings_button_state,
+            style::button_row(Some(style::done_icon(20)), Some("Done")),
+        )
+        .on_press(Message::HideSettings)
+        .style(ActionButtonStyle);
 
-        let hmm = warning_icon();
-
-        let settings_button: Button<Message> =
-            Button::new(&mut self.settings_button_state, hmm.into()).into();
-
-        Row::new()
-            .push(start_button.width(Length::Shrink))
-            .push(status.width(Length::Fill))
-            .push(hmm.width(Length::Shrink))
-            .into()
+        close_button.into()
     }
-}
-
-fn icon(unicode: char) -> Text {
-    Text::new(&unicode.to_string())
-        .font(ICONS)
-        .width(Length::Units(20))
-        .horizontal_alignment(HorizontalAlignment::Center)
-        .size(20)
-}
-
-fn warning_icon() -> Text {
-    icon('')
 }

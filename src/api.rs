@@ -77,7 +77,7 @@ pub struct PlayerOrder {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CurrentTurn {
-    pub turn_id: u32,
+    pub turn_id: u64,
     pub number: u64,
     pub user_id: UserId,
     pub started: String,

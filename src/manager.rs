@@ -46,7 +46,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct GameInfo {
     pub game: Game,
-    pub download: Option<Download>,
+    pub download: Option<TransferState>,
     pub parsed: Option<Civ5Save>,
 }
 
@@ -54,7 +54,7 @@ pub struct GameInfo {
 struct Inner {
     config: Config,
     games: GetGamesAndPlayers,
-    download_state: HashMap<GameId, Download>,
+    download_state: HashMap<GameId, TransferState>,
     download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     new_files_seen: Vec<String>,
     parsed_saves: HashMap<GameId, Civ5Save>,
@@ -88,10 +88,13 @@ impl Inner {
 }
 
 #[derive(Debug, Clone)]
-pub enum Download {
+pub enum TransferState {
     Idle,
     Downloading,
-    Complete,
+    Downloaded,
+    UploadQueued,
+    Uploading,
+    UploadComplete,
 }
 
 #[derive(Debug, Clone)]
@@ -155,9 +158,7 @@ impl Manager {
         // if unknown_players.len() > 0 {
         //     let data = self.api()?.get_games_and_players([]).await?;
         // }
-        dbg!("???? 2");
         self.start_downloads().await.unwrap();
-        dbg!("???? 3");
         Ok(())
     }
 
@@ -183,21 +184,28 @@ impl Manager {
 
         // TODO: Use inner.my_games()
         for game in &games.games {
+            let span = trace_span!("", game = ?game.game_id);
+            let _enter = span.enter();
+
             if !game.is_user_id_turn(&user_id) {
+                trace!("Not my turn.");
                 continue;
             }
 
             {
                 let mut inner = self.inner.read().unwrap();
-                match inner.download_state.get(&game.game_id) {
+                let state = inner.download_state.get(&game.game_id);
+                trace!(?state);
+                match state {
                     None => {}
-                    Some(Download::Idle) => {}
+                    Some(TransferState::Idle) => {}
                     _ => continue,
                 }
             }
 
             let game_id = game.game_id.clone();
             let path = Self::save_dir()?.join(Self::filename(&game)?);
+            trace!(?path, "Downloading.");
             let (rx, handle) = self
                 .api()?
                 .get_latest_save_file_bytes(&game_id, &path)
@@ -205,7 +213,9 @@ impl Manager {
 
             {
                 let mut inner = self.inner.write().unwrap();
-                inner.download_state.insert(game_id, Download::Downloading);
+                inner
+                    .download_state
+                    .insert(game_id, TransferState::Downloading);
                 inner.download_rx.insert(game_id, rx);
             }
         }
@@ -215,6 +225,10 @@ impl Manager {
 
     fn saved_bytes_db_key(game_id: &GameId) -> String {
         format!("saved-bytes-{}", game_id)
+    }
+
+    fn upload_bytes_db_key(game_id: &GameId) -> String {
+        format!("upload-bytes-{}", game_id)
     }
 
     /// Windows: ~\Documents\My Games\Sid Meier's Civilization 5\Saves\hotseat\
@@ -251,6 +265,7 @@ impl Manager {
         Ok(format!("(civfun {}) {}.Civ5Save", game.game_id, cleaner_name).into())
     }
 
+    #[instrument(skip(self))]
     pub fn process_downloads(&self) {
         let games = {
             let inner = self.inner.read().unwrap();
@@ -258,14 +273,15 @@ impl Manager {
         };
 
         for game in &games.games {
-            let span = trace_span!("", id = ?game.game_id);
+            let game_id = &game.game_id;
+            let span = trace_span!("", ?game_id);
             let _enter = span.enter();
 
             let mut inner = self.inner.write().unwrap();
-            let mut update_state = None;
-            if let Some(Download::Downloading) = inner.download_state.get_mut(&game.game_id) {
+            let mut completed_download = None;
+            if let Some(TransferState::Downloading) = inner.download_state.get_mut(game_id) {
                 // TODO: This is probably a bug if it panics.
-                let rx = inner.download_rx.get_mut(&game.game_id).unwrap();
+                let rx = inner.download_rx.get_mut(game_id).unwrap();
                 loop {
                     let msg = match rx.try_recv() {
                         Ok(msg) => msg,
@@ -284,38 +300,61 @@ impl Manager {
                         }
                         DownloadMessage::Done(path) => {
                             trace!("Done!");
-
-                            // Save the file into the DB because:
-                            // 1) The user might delete the file in the future
-                            // 2) Be able to analyse the file and compare when the user uploads their turn.
-                            trace!(?path, "Placing save file into db.");
-                            let mut fp = File::open(&path).unwrap();
-                            let mut data = Vec::with_capacity(1_000_000);
-                            fp.read_to_end(&mut data).unwrap();
-                            self.db
-                                .insert(Self::saved_bytes_db_key(&game.game_id), data.clone())
-                                .unwrap();
-
-                            // Analyse the save
-                            trace!(data_len = ?data.len(), "Analysing save.");
-                            let civ5save = Civ5SaveReader::new(&data).parse().unwrap();
-                            trace!(?civ5save);
-                            inner.parsed_saves.insert(game.game_id.clone(), civ5save);
-
-                            update_state = Some(Download::Complete);
-                            inner.download_rx.remove(&game.game_id);
+                            // Use update_state variable because we need to modify
+                            // `inner.download_state` which is currently borrowed.
+                            completed_download = Some(path);
                             break;
                         }
                     }
                 }
             }
-            if let Some(new_state) = update_state {
-                inner.download_state.insert(game.game_id, new_state);
+            if let Some(path) = completed_download {
+                // Save the file into the DB because:
+                // 1) The user might delete the file in the future
+                // 2) Be able to analyse the file and compare when the user uploads their turn.
+                self.store_downloaded_save(&mut inner, &game_id, &path)
+                    .unwrap();
+                inner.download_rx.remove(&game.game_id);
             }
         }
     }
 
-    pub fn download_status(&self) -> Vec<Download> {
+    #[instrument(skip(self))]
+    fn store_downloaded_save(
+        &self,
+        inner: &mut RwLockWriteGuard<Inner>,
+        game_id: &GameId,
+        path: &PathBuf,
+    ) -> anyhow::Result<()> {
+        trace!("Placing save file into db.");
+        let mut fp = File::open(&path)?;
+        let mut data = Vec::with_capacity(1_000_000);
+        fp.read_to_end(&mut data)?;
+        self.db
+            .insert(Self::saved_bytes_db_key(&game_id), data.clone())?;
+        inner
+            .download_state
+            .insert(game_id.clone(), TransferState::Downloaded);
+
+        self.analyse_download(inner, game_id, &data)?;
+
+        Ok(())
+    }
+
+    fn analyse_download(
+        &self,
+        inner: &mut RwLockWriteGuard<Inner>,
+        game_id: &GameId,
+        data: &[u8],
+    ) -> Result<()> {
+        trace!(data_len = ?data.len(), "Analysing save.");
+        let civ5save = Civ5SaveReader::new(&data).parse()?;
+        trace!(?civ5save);
+        inner.parsed_saves.insert(game_id.clone(), civ5save);
+        Ok(())
+    }
+
+    pub fn download_status(&self) -> Vec<TransferState> {
         todo!()
     }
 
@@ -369,14 +408,13 @@ impl Manager {
         };
 
         for file in files {
-            self.check_save(&file).unwrap(); // TODO: unwrap
+            self.handle_save(&file).context(file).unwrap(); // TODO: unwrap
         }
 
         Ok(())
     }
 
-    ///
-    /// Casimir III_0028 BC-2320.Civ5Save
+    /// Example filename: Casimir III_0028 BC-2320.Civ5Save
     /// [Next turn's leader]_[Turn number] [(BC|AD)-Year].Civ5Save
     /// Filter current games:
     ///  - When turn number is the same or +1.
@@ -387,22 +425,105 @@ impl Manager {
     ///  - Copy the file bytes into the DB and queue for upload.
     ///  - Move the uploaded file to `civfun Archive/[game_id]_[turn]_[up]_[original name]`
     #[instrument(skip(self))]
-    fn check_save(&self, filename: &str) -> Result<()> {
+    fn handle_save(&self, filename: &str) -> Result<bool> {
         let turn = Self::turn_from_filename(filename)?;
-        let inner = self.inner.write().unwrap();
-        for game in inner.my_games()? {}
+        let turn = match turn {
+            Some(turn) => turn,
+            None => return Ok(false),
+        };
 
-        Ok(())
+        let full_path = Self::save_dir()?.join(filename);
+        trace!(?full_path);
+        let mut fp = File::open(full_path).context("Opening save")?;
+        let mut bytes = Vec::with_capacity(1_000_000);
+        fp.read_to_end(&mut bytes)?;
+        drop(fp);
+        let new_parsed_save = Civ5SaveReader::new(&bytes).parse()?;
+
+        let mut inner = self.inner.write().unwrap();
+        let game = Self::find_game_for_save(&mut inner, &new_parsed_save)?.unwrap();
+        self.db
+            .insert(Self::upload_bytes_db_key(&game.game.game_id), bytes)
+            .unwrap();
+
+        todo!()
+        // Ok(false)
     }
 
-    fn turn_from_filename(filename: &str) -> Result<u32> {
+    fn find_game_for_save(
+        inner: &mut RwLockWriteGuard<Inner>,
+        new_parsed_save: &Civ5Save,
+    ) -> Result<Option<GameInfo>> {
+        let mut smallest_diff = None;
+        for info in inner.my_games()? {
+            let game_id = info.game.game_id;
+            let new_turn = new_parsed_save.header.turn;
+            let span = trace_span!("diff", ?game_id, ?new_turn);
+            let _enter = span.enter();
+
+            // XXX: The turn in the filename doesn't match the API's turn.
+            // let other_turn = info.game.current_turn.number;
+            // if other_turn != turn && other_turn != turn + 1 {
+            //     trace!(other_turn, turn, "Turn doesn't match.");
+            //     continue;
+            // }
+            // trace!(other_turn, turn, "Turn matches!");
+
+            let last_parsed_save = match &info.parsed {
+                Some(other_parsed) => other_parsed,
+                None => {
+                    warn!("Save not parsed. Can not check.");
+                    continue;
+                }
+            };
+            let last_turn = last_parsed_save.header.turn;
+
+            if new_turn != last_turn && new_turn != last_turn + 1 {
+                trace!(
+                    ?new_turn,
+                    ?last_turn,
+                    "Save game turns aren't close enough."
+                );
+                continue;
+            }
+
+            let diff = new_parsed_save.difference_score(&last_parsed_save)?;
+            trace!(diff);
+            smallest_diff = match smallest_diff {
+                Some((sd, sd_info)) => {
+                    if diff < sd {
+                        Some((diff, info.clone()))
+                    } else {
+                        Some((sd, sd_info))
+                    }
+                }
+                None => Some((diff, info.clone())),
+            };
+        }
+        match smallest_diff {
+            Some((_, sd_info)) => {
+                info!(game_id = ?sd_info, "Smallest diff found.");
+                Ok(Some(sd_info))
+            }
+            None => {
+                warn!("No games found to compare.");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Returns Ok(None) when the filename is invalid.
+    fn turn_from_filename(filename: &str) -> Result<Option<u64>> {
         // TODO: once_cell
         let re = Regex::new(r"(?P<leader>.*?)_(?P<turn>\d{4}) (?P<year>.*?)\.Civ5Save").unwrap();
-        let captures = re.captures(&filename).unwrap(); // TODO: unwrap
+        let captures = match re.captures(&filename) {
+            None => return Ok(None),
+            Some(captures) => captures,
+        };
         trace!(?captures);
         let turn = captures.name("turn").unwrap().as_str();
-        let turn: u32 = turn.parse().unwrap();
-        Ok(turn)
+        let turn: u64 = turn.parse().unwrap();
+        Ok(Some(turn))
     }
 
     pub fn load_config(&mut self) -> Result<()> {
@@ -429,13 +550,38 @@ impl Manager {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub fn load_games(&mut self) -> Result<()> {
         let data = match self.db.get(GAME_API_RESPONSE_KEY)? {
             Some(b) => serde_json::from_slice(&b)?,
             None => GetGamesAndPlayers::default(),
         };
+        trace!(?data, "Existing games in db.");
 
-        self.inner.write().unwrap().games = data;
+        let mut inner = self.inner.write().unwrap();
+        inner.games = data;
+
+        for game_id in inner
+            .games
+            .games
+            .clone()
+            .into_iter()
+            .map(|g| g.game_id.clone())
+        {
+            if self.db.contains_key(Self::saved_bytes_db_key(&game_id))? {
+                trace!(?game_id, "Marking game as already downloaded.");
+                inner
+                    .download_state
+                    .insert(game_id, TransferState::Downloaded);
+                let data = self
+                    .db
+                    .get(Self::saved_bytes_db_key(&game_id))
+                    .unwrap()
+                    .unwrap();
+                self.analyse_download(&mut inner, &game_id, &data)?;
+            }
+        }
+
         Ok(())
     }
 

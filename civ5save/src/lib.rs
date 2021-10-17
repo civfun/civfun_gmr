@@ -53,17 +53,17 @@ impl Debug for Chunk {
 
 #[derive(Clone, Debug)]
 pub struct Header {
-    save: u32,
-    game: String,
-    build: String,
-    turn: u32,
-    starting_civ: String,
-    handicap: String,
-    era: String,
-    current_era: String,
-    game_speed: String,
-    world_size: String,
-    map_script: String,
+    pub save: u32,
+    pub game: String,
+    pub build: String,
+    pub turn: u32,
+    pub starting_civ: String,
+    pub handicap: String,
+    pub era: String,
+    pub current_era: String,
+    pub game_speed: String,
+    pub world_size: String,
+    pub map_script: String,
 }
 
 #[derive(Clone, Debug)]
@@ -263,7 +263,7 @@ impl Civ5Save {
     /// This is pretty simple. Go through each chunk and compare by byte.
     ///
     /// The more it's wrong, the higher the result.
-    fn difference_score(&self, other: &Civ5Save) -> Result<u32> {
+    pub fn difference_score(&self, other: &Civ5Save) -> Result<u32> {
         let mut diff = 0u32;
         for (chunk_idx, chunk) in self.chunks.iter().enumerate() {
             let other_chunk = &other.chunks[chunk_idx];
