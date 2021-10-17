@@ -132,6 +132,13 @@ impl TryFrom<f32> for Percentage {
     }
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UploadResponse {
+    result_type: u8,
+    points_earned: u32,
+}
+
 #[derive(Clone, Debug)]
 pub enum DownloadMessage {
     Error(String),
@@ -278,13 +285,13 @@ impl Api {
     }
 
     #[instrument(skip(self))]
-    pub async fn submit_turn(
+    pub async fn upload_save_client(
         &self,
         turn_id: &TurnId,
         save_path: &PathBuf,
         // ) -> anyhow::Result<(mpsc::Receiver<UploadMessage>)> {
         // TODO: UploadMessage progress.
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<UploadResponse> {
         trace!("Starting upload.");
         let mut fp = File::open(save_path).await?;
         let mut bytes = Vec::with_capacity(1_000_000);
@@ -292,16 +299,28 @@ impl Api {
 
         let auth_key = self.auth_key.clone();
         let form = Form::new()
-            .text("turnId", format!("{}", turn_id))
-            .text("isCompressed", "False")
-            .text("authKey", auth_key)
-            .part("saveFileUpload", Part::bytes(bytes));
+            .part("turnId", text_part(format!("{}", turn_id)))
+            .part("isCompressed", text_part("False".into()))
+            .part("authKey", text_part(auth_key))
+            .part(
+                "saveFileUpload",
+                Part::bytes(bytes).file_name(format!("{}.Civ5Save", turn_id)),
+            );
 
-        self.query(Method::POST, "SubmitTurn", &[])?
+        let url = "http://multiplayerrobot.com/Game/UploadSaveClient";
+        let response = reqwest::Client::new()
+            .post(url)
             .multipart(form)
             .send()
             .await?;
 
-        Ok(())
+        let text = response.text().await?;
+        let resp: UploadResponse = serde_json::from_str(&text)?;
+        dbg!(&resp);
+        Ok(resp)
     }
+}
+
+fn text_part(s: String) -> Part {
+    Part::text(s).mime_str("text/plain; charset=utf-8").unwrap()
 }

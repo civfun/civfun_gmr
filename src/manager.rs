@@ -443,21 +443,24 @@ impl Manager {
 
         let mut inner = self.inner.write().unwrap();
         let info = Self::find_game_for_save(&mut inner, &new_parsed_save)?.unwrap();
+        let game_id = info.game.game_id;
         self.db
-            .insert(Self::upload_bytes_db_key(&info.game.game_id), bytes)
+            .insert(Self::upload_bytes_db_key(&game_id), bytes)
             .unwrap();
 
         let s = self.clone();
         tokio::spawn(async move {
+            let turn_id = info.game.current_turn.turn_id;
+            info!(?game_id, ?turn_id, "Uploading");
             s.api()
                 .unwrap()
-                .submit_turn(&info.game.current_turn.turn_id, &full_path)
+                .upload_save_client(&turn_id, &full_path)
                 .await
                 .unwrap();
+            info!(?game_id, ?turn_id, "Done!");
         });
 
-        todo!()
-        // Ok(false)
+        Ok(true)
     }
 
     fn find_game_for_save(
