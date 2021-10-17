@@ -46,7 +46,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct GameInfo {
     pub game: Game,
-    pub download: Option<TransferState>,
+    pub download: Option<State>,
     pub parsed: Option<Civ5Save>,
 }
 
@@ -54,7 +54,7 @@ pub struct GameInfo {
 struct Inner {
     config: Config,
     games: GetGamesAndPlayers,
-    download_state: HashMap<GameId, TransferState>,
+    state: HashMap<GameId, State>,
     download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     upload_rx: HashMap<GameId, Receiver<UploadMessage>>,
     new_files_seen: Vec<String>,
@@ -68,7 +68,7 @@ impl Inner {
             .iter()
             .map(|game| GameInfo {
                 game: game.clone(),
-                download: self.download_state.get(&game.game_id).cloned(),
+                download: self.state.get(&game.game_id).cloned(),
                 parsed: self.parsed_saves.get(&game.game_id).cloned(),
             })
             .collect()
@@ -89,7 +89,7 @@ impl Inner {
 }
 
 #[derive(Debug, Clone)]
-pub enum TransferState {
+pub enum State {
     Idle,
     Downloading,
     Downloaded,
@@ -195,29 +195,13 @@ impl Manager {
 
             {
                 let mut inner = self.inner.read().unwrap();
-                let state = inner.download_state.get(&game.game_id);
+                let state = inner.state.get(&game.game_id);
                 trace!(?state);
                 match state {
                     None => {}
-                    Some(TransferState::Idle) => {}
+                    Some(State::Idle) => {}
                     _ => continue,
                 }
-            }
-
-            let game_id = game.game_id.clone();
-            let path = Self::save_dir()?.join(Self::filename(&game)?);
-            trace!(?path, "Downloading.");
-            let (rx, handle) = self
-                .api()?
-                .get_latest_save_file_bytes(&game_id, &path)
-                .await?;
-
-            {
-                let mut inner = self.inner.write().unwrap();
-                inner
-                    .download_state
-                    .insert(game_id, TransferState::Downloading);
-                inner.download_rx.insert(game_id, rx);
             }
         }
 
@@ -280,7 +264,7 @@ impl Manager {
 
             let mut inner = self.inner.write().unwrap();
             let mut completed_download = None;
-            if let Some(TransferState::Downloading) = inner.download_state.get_mut(game_id) {
+            if let Some(State::Downloading) = inner.state.get_mut(game_id) {
                 // TODO: This is probably a bug if it panics.
                 let rx = inner.download_rx.get_mut(game_id).unwrap();
                 loop {
@@ -333,9 +317,7 @@ impl Manager {
         fp.read_to_end(&mut data)?;
         self.db
             .insert(Self::saved_bytes_db_key(&game_id), data.clone())?;
-        inner
-            .download_state
-            .insert(game_id.clone(), TransferState::Downloaded);
+        inner.state.insert(game_id.clone(), State::Downloaded);
 
         self.analyse_download(inner, game_id, &data)?;
 
@@ -355,7 +337,7 @@ impl Manager {
         Ok(())
     }
 
-    pub fn download_status(&self) -> Vec<TransferState> {
+    pub fn download_status(&self) -> Vec<State> {
         todo!()
     }
 
@@ -448,20 +430,79 @@ impl Manager {
             .insert(Self::upload_bytes_db_key(&game_id), bytes)
             .unwrap();
 
-        let s = self.clone();
-        tokio::spawn(async move {
-            let turn_id = info.game.current_turn.turn_id;
-            info!(?game_id, ?turn_id, "Uploading");
-            s.api()
-                .unwrap()
-                .upload_save_client(&turn_id, &full_path)
-                .await
-                .unwrap();
-            info!(?game_id, ?turn_id, "Done!");
-        });
+        self.process_new_uploads();
 
         Ok(true)
     }
+
+    async fn process_transfers(&self) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
+
+        // Make sure the user is logged in.
+        if let AuthState::AuthResult(Some(u)) = inner.config.auth_state {
+        } else {
+            return Ok(());
+        }
+
+        for info in inner.my_games()? {
+            let game = &info.game;
+            let game_id = &info.game.game_id;
+            let state = match inner.state.get(game_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            match state {
+                State::Idle => self.handle_idle_state(&mut inner, game).await?,
+                State::Downloading => self.handle_downloading_state(&mut inner, game).await?,
+                State::Downloaded => self.handle_downloaded_state(&mut inner, game).await?,
+                State::UploadQueued => self.handle_upload_queued_state(&mut inner, game).await?,
+                State::Uploading => self.handle_uploading_state(&mut inner, game).await?,
+                State::UploadComplete => {
+                    todo!()
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_idle_state(
+        &mut self,
+        inner: &mut RwLockWriteGuard<Inner>,
+        game: &Game,
+    ) -> Result<()> {
+        let api = self.api_no_lock(&*inner)?;
+        let path = Self::save_dir()?.join(Self::filename(&game)?);
+        trace!(?path, "Downloading.");
+        let (rx, handle) = api.get_latest_save_file_bytes(&game.game_id, &path).await?;
+        inner.state.insert(*game.game_id, State::Downloading);
+        inner.download_rx.insert(*game.game_id, rx);
+        Ok(())
+    }
+
+    // fn process_new_uploads(&self) -> Result<()> {
+    //     let mut inner = self.inner.write().unwrap();
+    //     for info in inner.my_games()? {
+    //         let game_id = info.game.game_id;
+    //         match inner.transfer_state.get(&game_id) {
+    //             TransferState::UploadQueued => {}
+    //             TransferState::Uploading => {}
+    //         }
+    //
+    //     }
+    //     inner.upload_rx
+    //
+    //     let s = self.clone();
+    //     tokio::spawn(async move {
+    //         let turn_id = info.game.current_turn.turn_id;
+    //         info!(?game_id, ?turn_id, "Uploading.");
+    //         let rx = s
+    //             .api()
+    //             .unwrap()
+    //             .upload_save_client(&turn_id, &full_path)
+    //             .await
+    //             .unwrap();
+    //     });
+    // }
 
     fn find_game_for_save(
         inner: &mut RwLockWriteGuard<Inner>,
@@ -583,9 +624,7 @@ impl Manager {
         {
             if self.db.contains_key(Self::saved_bytes_db_key(&game_id))? {
                 trace!(?game_id, "Marking game as already downloaded.");
-                inner
-                    .download_state
-                    .insert(game_id, TransferState::Downloaded);
+                inner.state.insert(game_id, State::Downloaded);
                 let data = self
                     .db
                     .get(Self::saved_bytes_db_key(&game_id))
@@ -613,6 +652,10 @@ impl Manager {
 
     fn api(&self) -> Result<Api> {
         let inner = self.inner.read().unwrap();
+        self.api_no_lock(&*inner)
+    }
+
+    fn api_no_lock(&self, inner: &Inner) -> Result<Api> {
         match &inner.config.auth_key {
             Some(auth_key) => Ok(Api::new(auth_key)),
             None => Err(anyhow!("Attempt to access API without auth key.")),

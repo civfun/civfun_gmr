@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context};
 use iced::futures::{Stream, StreamExt};
 use reqwest::multipart::{Form, Part};
-use reqwest::{Method, RequestBuilder, Response};
+use reqwest::{Body, Method, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
@@ -289,35 +289,51 @@ impl Api {
         &self,
         turn_id: &TurnId,
         save_path: &PathBuf,
-        // ) -> anyhow::Result<(mpsc::Receiver<UploadMessage>)> {
-        // TODO: UploadMessage progress.
-    ) -> anyhow::Result<UploadResponse> {
-        trace!("Starting upload.");
+    ) -> anyhow::Result<(mpsc::Receiver<UploadMessage>)> {
+        let (tx, rx) = mpsc::channel(32);
+
         let mut fp = File::open(save_path).await?;
-        let mut bytes = Vec::with_capacity(1_000_000);
-        fp.read_to_end(&mut bytes).await?;
 
-        let auth_key = self.auth_key.clone();
-        let form = Form::new()
-            .part("turnId", text_part(format!("{}", turn_id)))
-            .part("isCompressed", text_part("False".into()))
-            .part("authKey", text_part(auth_key))
-            .part(
-                "saveFileUpload",
-                Part::bytes(bytes).file_name(format!("{}.Civ5Save", turn_id)),
-            );
+        tokio::spawn(async move {
+            trace!("Starting upload.");
+            tx.send(UploadMessage::Started);
 
-        let url = "http://multiplayerrobot.com/Game/UploadSaveClient";
-        let response = reqwest::Client::new()
-            .post(url)
-            .multipart(form)
-            .send()
-            .await?;
+            // TODO: Stream
+            // let stream = FramedRead::new(fp, BytesCodec::new());
+            // let body = Body::wrap_stream(stream);
 
-        let text = response.text().await?;
-        let resp: UploadResponse = serde_json::from_str(&text)?;
-        dbg!(&resp);
-        Ok(resp)
+            let mut bytes = Vec::with_capacity(1_000_000);
+            fp.read_to_end(&mut bytes).await?;
+
+            let auth_key = self.auth_key.clone();
+            let form = Form::new()
+                .part("turnId", text_part(format!("{}", turn_id)))
+                .part("isCompressed", text_part("False".into()))
+                .part("authKey", text_part(auth_key))
+                .part(
+                    "saveFileUpload",
+                    Part::bytes(bytes).file_name(format!("{}.Civ5Save", turn_id)),
+                );
+
+            let url = "http://multiplayerrobot.com/Game/UploadSaveClient";
+            let response = reqwest::Client::new()
+                .post(url)
+                .multipart(form)
+                .send()
+                .await?;
+            trace!("Upload done.");
+
+            let text = response.text().await?;
+            let resp: UploadResponse = serde_json::from_str(&text)?;
+            trace!(?resp);
+            if resp.result_type == 0 {
+                return Err(anyhow!("Response returned 0 for an unknown reason."));
+            }
+
+            tx.send(UploadMessage::Done);
+        });
+
+        Ok(rx)
     }
 }
 
