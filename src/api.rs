@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context};
 use iced::futures::{Stream, StreamExt};
-use reqwest::Response;
+use reqwest::multipart::{Form, Part};
+use reqwest::{Method, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
@@ -8,9 +9,11 @@ use std::fmt::{Display, Formatter};
 use std::io::{Bytes, Write};
 use std::path::{Path, PathBuf};
 use tempfile::{NamedTempFile, TempPath};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{info, instrument, trace};
+use tracing::{info, instrument, trace, trace_span};
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserId(u64);
@@ -37,6 +40,21 @@ impl From<u32> for GameId {
 }
 
 impl Display for GameId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+pub struct TurnId(u64);
+
+impl From<u64> for TurnId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl Display for TurnId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -77,7 +95,7 @@ pub struct PlayerOrder {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CurrentTurn {
-    pub turn_id: u64,
+    pub turn_id: TurnId,
     pub number: u64,
     pub user_id: UserId,
     pub started: String,
@@ -122,6 +140,14 @@ pub enum DownloadMessage {
     Done(PathBuf),
 }
 
+#[derive(Clone, Debug)]
+pub enum UploadMessage {
+    Error(String),
+    Started,
+    Chunk(Option<Percentage>),
+    Done,
+}
+
 #[derive(Clone)]
 pub struct Api {
     auth_key: String,
@@ -135,20 +161,24 @@ impl Api {
     }
 
     #[instrument(skip(self))]
-    async fn get(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<Response> {
+    fn query(
+        &self,
+        method: Method,
+        endpoint: &str,
+        extra_query: &[(&str, &str)],
+    ) -> anyhow::Result<RequestBuilder> {
         let client = reqwest::Client::new();
         let mut query = vec![];
         query.push(("authKey", self.auth_key.as_str()));
         query.extend_from_slice(extra_query);
-        trace!("Making request.");
-        Ok(client
-            .get(format!(
-                "http://multiplayerrobot.com/api/Diplomacy/{}",
-                endpoint
-            ))
-            .query(&query)
-            .send()
-            .await?)
+        let url = format!("http://multiplayerrobot.com/api/Diplomacy/{}", endpoint);
+        Ok(client.request(method, url).query(&query))
+    }
+
+    #[instrument(skip(self))]
+    async fn get(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<Response> {
+        let req = self.query(Method::GET, endpoint, extra_query)?;
+        Ok(req.send().await?)
     }
 
     #[instrument(skip(self))]
@@ -245,5 +275,33 @@ impl Api {
         });
 
         Ok((rx, handle))
+    }
+
+    #[instrument(skip(self))]
+    pub async fn submit_turn(
+        &self,
+        turn_id: &TurnId,
+        save_path: &PathBuf,
+        // ) -> anyhow::Result<(mpsc::Receiver<UploadMessage>)> {
+        // TODO: UploadMessage progress.
+    ) -> anyhow::Result<()> {
+        trace!("Starting upload.");
+        let mut fp = File::open(save_path).await?;
+        let mut bytes = Vec::with_capacity(1_000_000);
+        fp.read_to_end(&mut bytes).await?;
+
+        let auth_key = self.auth_key.clone();
+        let form = Form::new()
+            .text("turnId", format!("{}", turn_id))
+            .text("isCompressed", "False")
+            .text("authKey", auth_key)
+            .part("saveFileUpload", Part::bytes(bytes));
+
+        self.query(Method::POST, "SubmitTurn", &[])?
+            .multipart(form)
+            .send()
+            .await?;
+
+        Ok(())
     }
 }

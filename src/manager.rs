@@ -1,4 +1,4 @@
-use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UserId};
+use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UploadMessage, UserId};
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
@@ -56,6 +56,7 @@ struct Inner {
     games: GetGamesAndPlayers,
     download_state: HashMap<GameId, TransferState>,
     download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
+    upload_rx: HashMap<GameId, Receiver<UploadMessage>>,
     new_files_seen: Vec<String>,
     parsed_saves: HashMap<GameId, Civ5Save>,
 }
@@ -434,17 +435,26 @@ impl Manager {
 
         let full_path = Self::save_dir()?.join(filename);
         trace!(?full_path);
-        let mut fp = File::open(full_path).context("Opening save")?;
+        let mut fp = File::open(&full_path).context("Opening save")?;
         let mut bytes = Vec::with_capacity(1_000_000);
         fp.read_to_end(&mut bytes)?;
         drop(fp);
         let new_parsed_save = Civ5SaveReader::new(&bytes).parse()?;
 
         let mut inner = self.inner.write().unwrap();
-        let game = Self::find_game_for_save(&mut inner, &new_parsed_save)?.unwrap();
+        let info = Self::find_game_for_save(&mut inner, &new_parsed_save)?.unwrap();
         self.db
-            .insert(Self::upload_bytes_db_key(&game.game.game_id), bytes)
+            .insert(Self::upload_bytes_db_key(&info.game.game_id), bytes)
             .unwrap();
+
+        let s = self.clone();
+        tokio::spawn(async move {
+            s.api()
+                .unwrap()
+                .submit_turn(&info.game.current_turn.turn_id, &full_path)
+                .await
+                .unwrap();
+        });
 
         todo!()
         // Ok(false)
