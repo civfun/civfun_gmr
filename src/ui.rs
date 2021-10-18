@@ -79,8 +79,8 @@ pub enum Message {
     RequestRefresh,
     HasRefreshed(()),
     StartedWatching(()),
-    ProcessDownloads,
-    ProcessSaves,
+    ProcessTransfers,
+    ProcessNewSaves,
     AuthKeyInputChanged(String),
     AuthKeySave,
     PlayCiv,
@@ -203,12 +203,15 @@ impl Application for CivFunUi {
                 // self.players = data.players;
                 // info!("games len {}", self.games.len());
             }
-            ProcessDownloads => {
+            ProcessTransfers => {
                 if let Some(ref mut manager) = self.manager {
-                    manager.process_downloads();
+                    let mut manager = manager.clone();
+                    tokio::spawn(async move {
+                        manager.process_transfers().await.unwrap();
+                    });
                 }
             }
-            ProcessSaves => {
+            ProcessNewSaves => {
                 if let Some(ref mut manager) = self.manager {
                     manager.process_new_saves().unwrap();
                 }
@@ -248,8 +251,8 @@ impl Application for CivFunUi {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh),
-            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessDownloads),
-            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessSaves),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessTransfers),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessNewSaves),
         ])
     }
 

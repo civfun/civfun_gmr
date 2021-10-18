@@ -1,4 +1,6 @@
-use crate::api::{Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, UploadMessage, UserId};
+use crate::api::{
+    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, TurnId, UploadMessage, UserId,
+};
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
 use anyhow::Context;
@@ -208,8 +210,8 @@ impl Manager {
         Ok(Some(())) // TODO: return something useful?
     }
 
-    fn saved_bytes_db_key(game_id: &GameId) -> String {
-        format!("saved-bytes-{}", game_id)
+    fn saved_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
+        format!("saved-bytes-{}-{}", game_id, turn_id)
     }
 
     fn upload_bytes_db_key(game_id: &GameId) -> String {
@@ -251,64 +253,11 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub fn process_downloads(&self) {
-        let games = {
-            let inner = self.inner.read().unwrap();
-            inner.games.clone()
-        };
-
-        for game in &games.games {
-            let game_id = &game.game_id;
-            let span = trace_span!("", ?game_id);
-            let _enter = span.enter();
-
-            let mut inner = self.inner.write().unwrap();
-            let mut completed_download = None;
-            if let Some(State::Downloading) = inner.state.get_mut(game_id) {
-                // TODO: This is probably a bug if it panics.
-                let rx = inner.download_rx.get_mut(game_id).unwrap();
-                loop {
-                    let msg = match rx.try_recv() {
-                        Ok(msg) => msg,
-                        Err(TryRecvError::Empty) => break,
-                        Err(err) => panic!("{:?}", err),
-                    };
-                    match msg {
-                        DownloadMessage::Error(e) => {
-                            error!(?e, "Download");
-                        }
-                        DownloadMessage::Started(size) => {
-                            trace!(?size, "Started");
-                        }
-                        DownloadMessage::Chunk(percentage) => {
-                            trace!(?percentage, "Download progress");
-                        }
-                        DownloadMessage::Done(path) => {
-                            trace!("Done!");
-                            // Use update_state variable because we need to modify
-                            // `inner.download_state` which is currently borrowed.
-                            completed_download = Some(path);
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(path) = completed_download {
-                // Save the file into the DB because:
-                // 1) The user might delete the file in the future
-                // 2) Be able to analyse the file and compare when the user uploads their turn.
-                self.store_downloaded_save(&mut inner, &game_id, &path)
-                    .unwrap();
-                inner.download_rx.remove(&game.game_id);
-            }
-        }
-    }
-
-    #[instrument(skip(self))]
     fn store_downloaded_save(
         &self,
         inner: &mut RwLockWriteGuard<Inner>,
         game_id: &GameId,
+        turn_id: &TurnId,
         path: &PathBuf,
     ) -> anyhow::Result<()> {
         trace!("Placing save file into db.");
@@ -316,7 +265,7 @@ impl Manager {
         let mut data = Vec::with_capacity(1_000_000);
         fp.read_to_end(&mut data)?;
         self.db
-            .insert(Self::saved_bytes_db_key(&game_id), data.clone())?;
+            .insert(Self::saved_bytes_db_key(&game_id, &turn_id), data.clone())?;
         inner.state.insert(game_id.clone(), State::Downloaded);
 
         self.analyse_download(inner, game_id, &data)?;
@@ -429,80 +378,129 @@ impl Manager {
         self.db
             .insert(Self::upload_bytes_db_key(&game_id), bytes)
             .unwrap();
-
-        self.process_new_uploads();
+        inner.state.insert(game_id, State::UploadQueued);
 
         Ok(true)
     }
 
-    async fn process_transfers(&self) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
-
-        // Make sure the user is logged in.
-        if let AuthState::AuthResult(Some(u)) = inner.config.auth_state {
-        } else {
+    #[instrument(skip(self))]
+    pub async fn process_transfers(&mut self) -> Result<()> {
+        if !self.user_ready() {
             return Ok(());
         }
+        let my_games = self.inner.read().unwrap().my_games()?.clone();
 
-        for info in inner.my_games()? {
-            let game = &info.game;
-            let game_id = &info.game.game_id;
-            let state = match inner.state.get(game_id) {
-                Some(s) => s,
-                None => continue,
-            };
-            match state {
-                State::Idle => self.handle_idle_state(&mut inner, game).await?,
-                State::Downloading => self.handle_downloading_state(&mut inner, game).await?,
-                State::Downloaded => self.handle_downloaded_state(&mut inner, game).await?,
-                State::UploadQueued => self.handle_upload_queued_state(&mut inner, game).await?,
-                State::Uploading => self.handle_uploading_state(&mut inner, game).await?,
-                State::UploadComplete => {
-                    todo!()
+        for info in my_games {
+            let game_id = info.game.game_id;
+            let state = {
+                let inner = self.inner.read().unwrap();
+                match inner.state.get(&info.game.game_id) {
+                    Some(s) => s.clone(),
+                    None => State::Idle,
                 }
+            };
+
+            trace!(?game_id, ?state);
+
+            match state {
+                State::Idle => self.handle_idle(info).await?,
+                State::Downloading => self.handle_downloading(info).await?,
+                State::Downloaded => {}
+                State::UploadQueued => self.handle_upload_queued(info).await?,
+                // State::Uploading => self.handle_uploading(&mut inner, game).await?,
+                // State::UploadComplete => self.handle_upload_complete(&mut inner, game).await?,
+                _ => todo!("{:?}", state),
             }
         }
         Ok(())
     }
 
-    async fn handle_idle_state(
-        &mut self,
-        inner: &mut RwLockWriteGuard<Inner>,
-        game: &Game,
-    ) -> Result<()> {
-        let api = self.api_no_lock(&*inner)?;
-        let path = Self::save_dir()?.join(Self::filename(&game)?);
+    #[instrument(skip(self, info))]
+    async fn handle_idle(&mut self, info: GameInfo) -> Result<()> {
+        let path = Self::save_dir()?.join(Self::filename(&info.game)?);
         trace!(?path, "Downloading.");
-        let (rx, handle) = api.get_latest_save_file_bytes(&game.game_id, &path).await?;
-        inner.state.insert(*game.game_id, State::Downloading);
-        inner.download_rx.insert(*game.game_id, rx);
+        let (rx, handle) = self
+            .api()?
+            .get_latest_save_file_bytes(&info.game.game_id, &path)
+            .await?;
+        let mut inner = self.inner.write().unwrap();
+        inner.state.insert(info.game.game_id, State::Downloading);
+        inner.download_rx.insert(info.game.game_id, rx);
         Ok(())
     }
 
-    // fn process_new_uploads(&self) -> Result<()> {
-    //     let mut inner = self.inner.write().unwrap();
-    //     for info in inner.my_games()? {
-    //         let game_id = info.game.game_id;
-    //         match inner.transfer_state.get(&game_id) {
-    //             TransferState::UploadQueued => {}
-    //             TransferState::Uploading => {}
-    //         }
-    //
-    //     }
-    //     inner.upload_rx
-    //
-    //     let s = self.clone();
-    //     tokio::spawn(async move {
-    //         let turn_id = info.game.current_turn.turn_id;
-    //         info!(?game_id, ?turn_id, "Uploading.");
-    //         let rx = s
-    //             .api()
-    //             .unwrap()
-    //             .upload_save_client(&turn_id, &full_path)
-    //             .await
-    //             .unwrap();
-    //     });
-    // }
+    #[instrument(skip(self, info))]
+    async fn handle_downloading(&mut self, info: GameInfo) -> Result<()> {
+        let game_id = &info.game.game_id;
+        let turn_id = &info.game.current_turn.turn_id;
+        let mut inner = self.inner.write().unwrap();
+        let rx = inner.download_rx.get_mut(game_id).unwrap();
+        let mut completed_download = None;
+        loop {
+            let msg = match rx.try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => break,
+                Err(err) => panic!("{:?}", err),
+            };
+            match msg {
+                DownloadMessage::Error(e) => {
+                    error!(?e, "Download");
+                }
+                DownloadMessage::Started(size) => {
+                    trace!(?size, "Started");
+                }
+                DownloadMessage::Chunk(percentage) => {
+                    trace!(?percentage, "Download progress");
+                }
+                DownloadMessage::Done(path) => {
+                    trace!("Done!");
+                    // Use update_state variable because we need to modify
+                    // `inner.download_state` which is currently borrowed.
+                    completed_download = Some(path);
+                    break;
+                }
+            }
+        }
+        if let Some(path) = completed_download {
+            // Save the file into the DB because:
+            // 1) The user might delete the file in the future
+            // 2) Be able to analyse the file and compare when the user uploads their turn.
+            self.store_downloaded_save(&mut inner, &game_id, &turn_id, &path)
+                .unwrap();
+            inner.download_rx.remove(&game_id);
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self, info))]
+    async fn handle_upload_queued(&mut self, info: GameInfo) -> Result<()> {
+        let game_id = info.game.game_id;
+        let turn_id = info.game.current_turn.turn_id;
+        info!(?game_id);
+
+        let inner = self.inner.write().unwrap();
+        inner.state.insert(game_id, State::Uploading);
+
+        let s = self.clone();
+        tokio::spawn(async move {
+            // TODO: Second unwrap is for an empty entry.
+            // We're assuming the key exists if we've gone into this state.
+            let bytes =
+                s.db.get(Self::upload_bytes_db_key(&game_id))
+                    .unwrap()
+                    .unwrap();
+
+            info!(?game_id, ?turn_id, "Uploading.");
+            let rx = s
+                .api()
+                .unwrap()
+                .upload_save_client(turn_id, bytes.to_vec())
+                .await
+                .unwrap();
+        });
+
+        Ok(())
+    }
 
     fn find_game_for_save(
         inner: &mut RwLockWriteGuard<Inner>,
@@ -615,19 +613,19 @@ impl Manager {
         let mut inner = self.inner.write().unwrap();
         inner.games = data;
 
-        for game_id in inner
-            .games
-            .games
-            .clone()
-            .into_iter()
-            .map(|g| g.game_id.clone())
-        {
-            if self.db.contains_key(Self::saved_bytes_db_key(&game_id))? {
+        for game in inner.games.games.clone().into_iter().map(|g| g.clone()) {
+            let game_id = game.game_id;
+            let turn_id = game.current_turn.turn_id;
+
+            if self
+                .db
+                .contains_key(Self::saved_bytes_db_key(&game_id, &turn_id))?
+            {
                 trace!(?game_id, "Marking game as already downloaded.");
                 inner.state.insert(game_id, State::Downloaded);
                 let data = self
                     .db
-                    .get(Self::saved_bytes_db_key(&game_id))
+                    .get(Self::saved_bytes_db_key(&game_id, &turn_id))
                     .unwrap()
                     .unwrap();
                 self.analyse_download(&mut inner, &game_id, &data)?;
@@ -652,10 +650,10 @@ impl Manager {
 
     fn api(&self) -> Result<Api> {
         let inner = self.inner.read().unwrap();
-        self.api_no_lock(&*inner)
+        Self::api_no_lock(&*inner)
     }
 
-    fn api_no_lock(&self, inner: &Inner) -> Result<Api> {
+    fn api_no_lock(inner: &Inner) -> Result<Api> {
         match &inner.config.auth_key {
             Some(auth_key) => Ok(Api::new(auth_key)),
             None => Err(anyhow!("Attempt to access API without auth key.")),

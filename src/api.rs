@@ -287,25 +287,17 @@ impl Api {
     #[instrument(skip(self))]
     pub async fn upload_save_client(
         &self,
-        turn_id: &TurnId,
-        save_path: &PathBuf,
+        turn_id: TurnId,
+        bytes: Vec<u8>,
     ) -> anyhow::Result<(mpsc::Receiver<UploadMessage>)> {
         let (tx, rx) = mpsc::channel(32);
 
-        let mut fp = File::open(save_path).await?;
-
+        let s = self.clone();
         tokio::spawn(async move {
             trace!("Starting upload.");
             tx.send(UploadMessage::Started);
 
-            // TODO: Stream
-            // let stream = FramedRead::new(fp, BytesCodec::new());
-            // let body = Body::wrap_stream(stream);
-
-            let mut bytes = Vec::with_capacity(1_000_000);
-            fp.read_to_end(&mut bytes).await?;
-
-            let auth_key = self.auth_key.clone();
+            let auth_key = s.auth_key.clone();
             let form = Form::new()
                 .part("turnId", text_part(format!("{}", turn_id)))
                 .part("isCompressed", text_part("False".into()))
@@ -331,6 +323,7 @@ impl Api {
             }
 
             tx.send(UploadMessage::Done);
+            Ok(())
         });
 
         Ok(rx)
