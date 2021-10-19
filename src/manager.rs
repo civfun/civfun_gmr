@@ -26,6 +26,9 @@ type Result<T> = anyhow::Result<T>;
 const CONFIG_KEY: &str = "config";
 const GAME_API_RESPONSE_KEY: &str = "data";
 
+#[derive(Debug)]
+pub struct NewSaveEvent(String);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuthState {
     Nothing,
@@ -53,7 +56,23 @@ pub struct GameInfo {
 }
 
 #[derive(Debug, Default)]
-struct Inner {
+struct Inner {}
+
+impl Inner {}
+
+#[derive(Debug, Clone)]
+pub enum State {
+    Idle,
+    Downloading,
+    Downloaded,
+    UploadQueued,
+    Uploading,
+    UploadComplete,
+}
+
+#[derive(Debug)]
+pub struct Manager {
+    db: sled::Db,
     config: Config,
     games: GetGamesAndPlayers,
     state: HashMap<GameId, State>,
@@ -63,8 +82,56 @@ struct Inner {
     parsed_saves: HashMap<GameId, Civ5Save>,
 }
 
-impl Inner {
-    fn games(&self) -> Vec<GameInfo> {
+impl Manager {
+    pub fn new() -> Result<Self> {
+        let db_path =
+            data_dir_path(&PathBuf::from("db.sled")).context("Constructing db.sled path")?;
+        debug!("DB path: {:?}", &db_path);
+        let db = sled::open(&db_path)
+            .with_context(|| format!("Could not create db at {:?}", &db_path))?;
+
+        let mut s = Self {
+            db,
+            config: Default::default(),
+            games: Default::default(),
+            state: Default::default(),
+            download_rx: Default::default(),
+            upload_rx: Default::default(),
+            new_files_seen: vec![],
+            parsed_saves: Default::default(),
+        };
+        s.load_config()?;
+        s.load_games_from_db()?;
+
+        Ok(s)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn authenticate(&mut self) -> Result<Option<UserId>> {
+        let maybe_user_id = self.api()?.authenticate_user().await?;
+        debug!("User ID response: {:?}", maybe_user_id);
+        self.config.auth_state = AuthState::AuthResult(maybe_user_id);
+        self.save_config()?;
+        Ok(maybe_user_id)
+    }
+
+    /// Ready means we have an auth key and a user id.
+    pub fn all_ready(&self) -> bool {
+        self.auth_ready() && self.user_info_ready()
+    }
+
+    pub fn auth_ready(&self) -> bool {
+        self.config.auth_key.is_some()
+    }
+
+    pub fn user_info_ready(&self) -> bool {
+        match self.config.auth_state {
+            AuthState::AuthResult(Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    pub fn games(&self) -> Vec<GameInfo> {
         self.games
             .games
             .iter()
@@ -88,67 +155,6 @@ impl Inner {
             .filter(|g| g.game.is_user_id_turn(user_id))
             .collect())
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum State {
-    Idle,
-    Downloading,
-    Downloaded,
-    UploadQueued,
-    Uploading,
-    UploadComplete,
-}
-
-#[derive(Debug, Clone)]
-pub struct Manager {
-    db: sled::Db,
-    inner: Arc<RwLock<Inner>>,
-}
-
-impl Manager {
-    pub fn new() -> Result<Self> {
-        let db_path =
-            data_dir_path(&PathBuf::from("db.sled")).context("Constructing db.sled path")?;
-        debug!("DB path: {:?}", &db_path);
-        let db = sled::open(&db_path)
-            .with_context(|| format!("Could not create db at {:?}", &db_path))?;
-
-        let mut s = Self {
-            db,
-            inner: Default::default(),
-        };
-        s.load_config()?;
-        s.load_games()?;
-
-        Ok(s)
-    }
-
-    #[instrument(skip(self))]
-    pub async fn authenticate(&mut self) -> Result<Option<UserId>> {
-        let maybe_user_id = self.api()?.authenticate_user().await?;
-        debug!("User ID response: {:?}", maybe_user_id);
-        let mut inner = self.inner.write().unwrap();
-        inner.config.auth_state = AuthState::AuthResult(maybe_user_id);
-        self.save_config(&mut inner)?;
-        Ok(maybe_user_id)
-    }
-
-    /// Ready means we have an auth key and a user id.
-    pub fn all_ready(&self) -> bool {
-        self.auth_ready() && self.user_ready()
-    }
-
-    pub fn auth_ready(&self) -> bool {
-        self.inner.read().unwrap().config.auth_key.is_some()
-    }
-
-    pub fn user_ready(&self) -> bool {
-        match self.inner.read().unwrap().config.auth_state {
-            AuthState::AuthResult(Some(_)) => true,
-            _ => false,
-        }
-    }
 
     /// This will eventually fetch a second time if the players shown don't exist in the db.
     /// It will also start downloading games if they don't exist.
@@ -166,7 +172,7 @@ impl Manager {
     }
 
     pub fn user_id(&self) -> Option<UserId> {
-        if let AuthState::AuthResult(maybe_id) = self.inner.read().unwrap().config.auth_state {
+        if let AuthState::AuthResult(maybe_id) = self.config.auth_state {
             maybe_id
         } else {
             None
@@ -180,13 +186,9 @@ impl Manager {
             None => return Ok(None),
             Some(u) => u,
         };
-        let games = {
-            let inner = self.inner.read().unwrap();
-            inner.games.clone()
-        };
 
         // TODO: Use inner.my_games()
-        for game in &games.games {
+        for game in &self.games.games {
             let span = trace_span!("", game = ?game.game_id);
             let _enter = span.enter();
 
@@ -196,8 +198,7 @@ impl Manager {
             }
 
             {
-                let mut inner = self.inner.read().unwrap();
-                let state = inner.state.get(&game.game_id);
+                let state = self.state.get(&game.game_id);
                 trace!(?state);
                 match state {
                     None => {}
@@ -254,8 +255,7 @@ impl Manager {
 
     #[instrument(skip(self))]
     fn store_downloaded_save(
-        &self,
-        inner: &mut RwLockWriteGuard<Inner>,
+        &mut self,
         game_id: &GameId,
         turn_id: &TurnId,
         path: &PathBuf,
@@ -266,23 +266,18 @@ impl Manager {
         fp.read_to_end(&mut data)?;
         self.db
             .insert(Self::saved_bytes_db_key(&game_id, &turn_id), data.clone())?;
-        inner.state.insert(game_id.clone(), State::Downloaded);
+        self.state.insert(game_id.clone(), State::Downloaded);
 
-        self.analyse_download(inner, game_id, &data)?;
+        self.analyse_download(game_id, &data)?;
 
         Ok(())
     }
 
-    fn analyse_download(
-        &self,
-        inner: &mut RwLockWriteGuard<Inner>,
-        game_id: &GameId,
-        data: &[u8],
-    ) -> Result<()> {
+    fn analyse_download(&mut self, game_id: &GameId, data: &[u8]) -> Result<()> {
         trace!(data_len = ?data.len(), "Analysing save.");
         let civ5save = Civ5SaveReader::new(&data).parse()?;
         trace!(?civ5save);
-        inner.parsed_saves.insert(game_id.clone(), civ5save);
+        self.parsed_saves.insert(game_id.clone(), civ5save);
         Ok(())
     }
 
@@ -291,29 +286,29 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub async fn start_watching_saves(&self) -> Result<()> {
+    pub async fn start_watching_saves(&mut self) -> Result<mpsc::Receiver<NewSaveEvent>> {
+        let (out_tx, out_rx) = mpsc::channel(100);
+
         let save_dir = Self::save_dir().unwrap();
         debug!(?save_dir);
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
-        watcher.watch(save_dir, RecursiveMode::NonRecursive)?;
-
-        let s = self.clone();
         tokio::spawn(async move {
-            // Move watcher into here, since it would be dropped otherwise and then the channel
-            // would be dropped.
-            let _ = watcher;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut watcher: RecommendedWatcher =
+                Watcher::new(tx, Duration::from_millis(250)).unwrap();
+            watcher
+                .watch(save_dir, RecursiveMode::NonRecursive)
+                .unwrap();
 
-            trace!("Loop started.");
+            trace!("Watch loop started.");
             loop {
-                match rx.try_recv() {
+                let result = rx.try_recv();
+                match result {
                     Ok(event) => {
                         info!(?event);
                         if let DebouncedEvent::Create(path) = event {
-                            let mut inner = s.inner.write().unwrap();
-                            let filename = path.file_name().unwrap().to_str().unwrap().into();
-                            inner.new_files_seen.push(filename);
+                            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                            out_tx.send(NewSaveEvent(filename)).await.unwrap();
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -327,21 +322,15 @@ impl Manager {
             }
         });
 
-        Ok(())
+        Ok(out_rx)
     }
 
-    pub fn process_new_saves(&self) -> Result<()> {
-        // Atomically get the files out of the inner struct.
-        let files = {
-            let mut inner = self.inner.write().unwrap();
-            let new_files = inner.new_files_seen.clone();
-            inner.new_files_seen = vec![];
-            new_files
-        };
+    pub fn process_new_saves(&mut self, watch_rx: mpsc::Receiver<NewSaveEvent>) -> Result<()> {
+        todo!("watch_rx");
 
-        for file in files {
-            self.handle_save(&file).context(file).unwrap(); // TODO: unwrap
-        }
+        // for file in &self.new_files_seen {
+        //     self.handle_save(&file).context(file).unwrap(); // TODO: unwrap
+        // }
 
         Ok(())
     }
@@ -357,7 +346,7 @@ impl Manager {
     ///  - Copy the file bytes into the DB and queue for upload.
     ///  - Move the uploaded file to `civfun Archive/[game_id]_[turn]_[up]_[original name]`
     #[instrument(skip(self))]
-    fn handle_save(&self, filename: &str) -> Result<bool> {
+    fn handle_save(&mut self, filename: &str) -> Result<bool> {
         let turn = Self::turn_from_filename(filename)?;
         let turn = match turn {
             Some(turn) => turn,
@@ -372,29 +361,28 @@ impl Manager {
         drop(fp);
         let new_parsed_save = Civ5SaveReader::new(&bytes).parse()?;
 
-        let mut inner = self.inner.write().unwrap();
-        let info = Self::find_game_for_save(&mut inner, &new_parsed_save)?.unwrap();
+        let info = self.find_game_for_save(&new_parsed_save)?.unwrap();
         let game_id = info.game.game_id;
         self.db
             .insert(Self::upload_bytes_db_key(&game_id), bytes)
             .unwrap();
-        inner.state.insert(game_id, State::UploadQueued);
+        self.state.insert(game_id, State::UploadQueued);
 
         Ok(true)
     }
 
     #[instrument(skip(self))]
-    pub async fn process_transfers(&mut self) -> Result<()> {
-        if !self.user_ready() {
+    pub fn process_transfers(&mut self) -> Result<()> {
+        trace!("Process transfers.");
+        if !self.user_info_ready() {
+            warn!("User info not ready.");
             return Ok(());
         }
-        let my_games = self.inner.read().unwrap().my_games()?.clone();
 
-        for info in my_games {
+        for info in self.my_games()? {
             let game_id = info.game.game_id;
             let state = {
-                let inner = self.inner.read().unwrap();
-                match inner.state.get(&info.game.game_id) {
+                match self.state.get(&info.game.game_id) {
                     Some(s) => s.clone(),
                     None => State::Idle,
                 }
@@ -403,10 +391,10 @@ impl Manager {
             trace!(?game_id, ?state);
 
             match state {
-                State::Idle => self.handle_idle(info).await?,
-                State::Downloading => self.handle_downloading(info).await?,
+                State::Idle => self.handle_idle(info)?,
+                State::Downloading => self.handle_downloading(info)?,
                 State::Downloaded => {}
-                State::UploadQueued => self.handle_upload_queued(info).await?,
+                State::UploadQueued => self.handle_upload_queued(info)?,
                 // State::Uploading => self.handle_uploading(&mut inner, game).await?,
                 // State::UploadComplete => self.handle_upload_complete(&mut inner, game).await?,
                 _ => todo!("{:?}", state),
@@ -416,25 +404,29 @@ impl Manager {
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_idle(&mut self, info: GameInfo) -> Result<()> {
+    fn handle_idle(&mut self, info: GameInfo) -> Result<()> {
         let path = Self::save_dir()?.join(Self::filename(&info.game)?);
         trace!(?path, "Downloading.");
-        let (rx, handle) = self
-            .api()?
-            .get_latest_save_file_bytes(&info.game.game_id, &path)
-            .await?;
-        let mut inner = self.inner.write().unwrap();
-        inner.state.insert(info.game.game_id, State::Downloading);
-        inner.download_rx.insert(info.game.game_id, rx);
-        Ok(())
+
+        todo!("make this fn not async")
+
+        // let (rx, handle) = self
+        //     .api()?
+        //     .get_latest_save_file_bytes(&info.game.game_id, &path)
+        //     .await?;
+        //
+        // self.
+        //     .state
+        //     .insert(info.game.game_id, State::Downloading);
+        // self.download_rx.insert(info.game.game_id, rx);
+        // Ok(())
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_downloading(&mut self, info: GameInfo) -> Result<()> {
+    fn handle_downloading(&mut self, info: GameInfo) -> Result<()> {
         let game_id = &info.game.game_id;
         let turn_id = &info.game.current_turn.turn_id;
-        let mut inner = self.inner.write().unwrap();
-        let rx = inner.download_rx.get_mut(game_id).unwrap();
+        let rx = self.download_rx.get_mut(game_id).unwrap();
         let mut completed_download = None;
         loop {
             let msg = match rx.try_recv() {
@@ -465,49 +457,45 @@ impl Manager {
             // Save the file into the DB because:
             // 1) The user might delete the file in the future
             // 2) Be able to analyse the file and compare when the user uploads their turn.
-            self.store_downloaded_save(&mut inner, &game_id, &turn_id, &path)
+            self.store_downloaded_save(&game_id, &turn_id, &path)
                 .unwrap();
-            inner.download_rx.remove(&game_id);
+            self.download_rx.remove(&game_id);
         }
         Ok(())
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_upload_queued(&mut self, info: GameInfo) -> Result<()> {
+    fn handle_upload_queued(&mut self, info: GameInfo) -> Result<()> {
         let game_id = info.game.game_id;
         let turn_id = info.game.current_turn.turn_id;
         info!(?game_id);
 
-        let inner = self.inner.write().unwrap();
-        inner.state.insert(game_id, State::Uploading);
+        self.state.insert(game_id, State::Uploading);
 
-        let s = self.clone();
-        tokio::spawn(async move {
-            // TODO: Second unwrap is for an empty entry.
-            // We're assuming the key exists if we've gone into this state.
-            let bytes =
-                s.db.get(Self::upload_bytes_db_key(&game_id))
-                    .unwrap()
-                    .unwrap();
+        // We're assuming the key exists if we've gone into this state.
+        let bytes = self
+            .db
+            .get(Self::upload_bytes_db_key(&game_id))
+            .unwrap()
+            .unwrap();
 
-            info!(?game_id, ?turn_id, "Uploading.");
-            let rx = s
-                .api()
-                .unwrap()
-                .upload_save_client(turn_id, bytes.to_vec())
-                .await
-                .unwrap();
-        });
+        info!(?game_id, ?turn_id, "Uploading.");
+        todo!("try make this function not async");
+        // let rx = self
+        //     .api()
+        //     .unwrap()
+        //     .upload_save_client(turn_id, bytes.to_vec())
+        //     .await
+        //     .unwrap();
+
+        todo!("store rx for upload");
 
         Ok(())
     }
 
-    fn find_game_for_save(
-        inner: &mut RwLockWriteGuard<Inner>,
-        new_parsed_save: &Civ5Save,
-    ) -> Result<Option<GameInfo>> {
+    fn find_game_for_save(&self, new_parsed_save: &Civ5Save) -> Result<Option<GameInfo>> {
         let mut smallest_diff = None;
-        for info in inner.my_games()? {
+        for info in self.my_games()? {
             let game_id = info.game.game_id;
             let new_turn = new_parsed_save.header.turn;
             let span = trace_span!("diff", ?game_id, ?new_turn);
@@ -583,63 +571,60 @@ impl Manager {
             Some(b) => serde_json::from_slice(&b)?,
             None => Config::default(),
         };
-        self.inner.write().unwrap().config = config;
+        self.config = config;
         Ok(())
     }
 
     // RwLockWriteGuard is used here so that a config field can be modified within the same
     // write lock as the caller.
-    fn save_config(&self, inner: &mut RwLockWriteGuard<Inner>) -> Result<()> {
-        let encoded = serde_json::to_vec(&inner.config)?;
+    fn save_config(&self) -> Result<()> {
+        let encoded = serde_json::to_vec(&self.config)?;
         self.db.insert(CONFIG_KEY, encoded.as_slice())?;
         Ok(())
     }
 
     pub fn save_auth_key(&mut self, key: &str) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
-        inner.config.auth_key = Some(key.to_owned());
-        self.save_config(&mut inner)?;
+        self.config.auth_key = Some(key.to_owned());
+        self.save_config()?;
         Ok(())
     }
 
     #[instrument(skip(self))]
-    pub fn load_games(&mut self) -> Result<()> {
+    pub fn load_games_from_db(&mut self) -> Result<()> {
         let data = match self.db.get(GAME_API_RESPONSE_KEY)? {
             Some(b) => serde_json::from_slice(&b)?,
             None => GetGamesAndPlayers::default(),
         };
         trace!(?data, "Existing games in db.");
 
-        let mut inner = self.inner.write().unwrap();
-        inner.games = data;
+        self.games = data;
 
-        for game in inner.games.games.clone().into_iter().map(|g| g.clone()) {
-            let game_id = game.game_id;
-            let turn_id = game.current_turn.turn_id;
+        for game in &self.games.games.clone() {
+            let game_id = &game.game_id;
+            let turn_id = &game.current_turn.turn_id;
 
             if self
                 .db
-                .contains_key(Self::saved_bytes_db_key(&game_id, &turn_id))?
+                .contains_key(Self::saved_bytes_db_key(game_id, turn_id))?
             {
                 trace!(?game_id, "Marking game as already downloaded.");
-                inner.state.insert(game_id, State::Downloaded);
+                self.state.insert(game_id.clone(), State::Downloaded);
                 let data = self
                     .db
-                    .get(Self::saved_bytes_db_key(&game_id, &turn_id))
+                    .get(Self::saved_bytes_db_key(game_id, turn_id))
                     .unwrap()
                     .unwrap();
-                self.analyse_download(&mut inner, &game_id, &data)?;
+                self.analyse_download(game_id, &data)?;
             }
         }
 
         Ok(())
     }
 
-    pub fn save_games(&self, data: GetGamesAndPlayers) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
+    pub fn save_games(&mut self, data: GetGamesAndPlayers) -> Result<()> {
         let encoded = serde_json::to_vec(&data)?;
         self.db.insert(GAME_API_RESPONSE_KEY, encoded.as_slice())?;
-        inner.games = data;
+        self.games = data;
         Ok(())
     }
 
@@ -649,20 +634,9 @@ impl Manager {
     }
 
     fn api(&self) -> Result<Api> {
-        let inner = self.inner.read().unwrap();
-        Self::api_no_lock(&*inner)
-    }
-
-    fn api_no_lock(inner: &Inner) -> Result<Api> {
-        match &inner.config.auth_key {
+        match &self.config.auth_key {
             Some(auth_key) => Ok(Api::new(auth_key)),
             None => Err(anyhow!("Attempt to access API without auth key.")),
         }
-    }
-
-    pub fn games(&self) -> Vec<GameInfo> {
-        let inner = self.inner.read().unwrap();
-        let games = inner.games();
-        games.clone()
     }
 }

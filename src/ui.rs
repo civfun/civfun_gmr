@@ -74,7 +74,7 @@ pub struct CivFunUi {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    ManagerLoaded(Manager),
+    ManagerLoaded,
     AuthResponse(Option<UserId>),
     RequestRefresh,
     HasRefreshed(()),
@@ -109,13 +109,14 @@ fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
         return Command::none();
     }
 
-    let mut manager = manager.clone();
-    Command::perform(
-        async {
-            fetch(manager).await;
-        },
-        Message::HasRefreshed,
-    )
+    // let mut manager = manager.clone();
+    // Command::perform(
+    //     async {
+    //         fetch(manager).await;
+    //     },
+    //     Message::HasRefreshed,
+    // )
+    todo!()
 }
 
 #[instrument(skip(manager))]
@@ -128,10 +129,12 @@ fn watch_cmd(manager: &Option<Manager>) -> Command<Message> {
         }
     };
 
-    Command::perform(
-        async move { manager.start_watching_saves().await.unwrap() },
-        Message::StartedWatching,
-    ) // TODO: unwrap
+    todo!("Start watching saves");
+
+    // Command::perform(
+    //     async move { manager.start_watching_saves().await.unwrap() },
+    //     Message::StartedWatching,
+    // ) // TODO: unwrap
 }
 
 async fn authenticate(mut manager: Manager) -> Option<UserId> {
@@ -144,9 +147,12 @@ impl Application for CivFunUi {
     type Flags = ();
 
     fn new(_flags: ()) -> (CivFunUi, Command<Self::Message>) {
+        let mut ui = CivFunUi::default();
+        ui.manager = Some(Manager::new().unwrap());
         (
-            CivFunUi::default(),
-            Command::perform(prepare_manager(), Message::ManagerLoaded),
+            ui,
+            Command::none(),
+            // Command::perform(prepare_manager(), Message::ManagerLoaded),
         )
     }
 
@@ -162,21 +168,23 @@ impl Application for CivFunUi {
     ) -> Command<Self::Message> {
         use Message::*;
         match message {
-            ManagerLoaded(mut manager) => {
+            ManagerLoaded => {
+                todo!("Can't get manager from ManagerLoaded");
                 debug!("ManagerLoaded");
-                self.manager = Some(manager.clone());
+                // self.manager = Some(manager);
 
-                if manager.auth_ready() {
-                    debug!("☑ Has auth key.");
-                    self.status_text = "Refreshing...".into();
-                    return Command::batch([
-                        fetch_cmd(&Some(manager.clone())),
-                        watch_cmd(&Some(manager.clone())),
-                        Command::perform(authenticate(manager.clone()), AuthResponse),
-                    ]);
-                } else {
-                    self.screen = Screen::AuthKeyInput;
-                }
+                todo!()
+                // if manager.auth_ready() {
+                //     debug!("☑ Has auth key.");
+                //     self.status_text = "Refreshing...".into();
+                //     return Command::batch([
+                //         fetch_cmd(&Some(manager.clone())),
+                //         watch_cmd(&Some(manager.clone())),
+                //         Command::perform(authenticate(manager.clone()), AuthResponse),
+                //     ]);
+                // } else {
+                //     self.screen = Screen::AuthKeyInput;
+                // }
             }
             AuthResponse(Some(_)) => {
                 debug!("Authenticated");
@@ -205,15 +213,14 @@ impl Application for CivFunUi {
             }
             ProcessTransfers => {
                 if let Some(ref mut manager) = self.manager {
-                    let mut manager = manager.clone();
-                    tokio::spawn(async move {
-                        manager.process_transfers().await.unwrap();
-                    });
+                    manager.process_transfers().unwrap();
                 }
             }
             ProcessNewSaves => {
                 if let Some(ref mut manager) = self.manager {
-                    manager.process_new_saves().unwrap();
+                    warn!("TODO ProcessNewSaves");
+                    // todo!()
+                    // manager.process_new_saves().unwrap();
                 }
             }
             // Refreshed(Err(err)) => {
