@@ -228,9 +228,6 @@ impl Application for CivFunUi {
                     manager
                         .save_auth_key(&self.enter_auth_key.input_value.trim())
                         .unwrap();
-                    // Clear the data since the user might have changed auth keys.
-                    manager.clear_games().unwrap(); // TODO: unwrap
-                    debug!("Saved auth key and reset data.");
                     self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
                     self.screen = Screen::Games;
                     return fetch_cmd(&self.manager);

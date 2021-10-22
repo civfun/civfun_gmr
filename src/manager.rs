@@ -42,6 +42,7 @@ impl Default for AuthState {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     auth_key: Option<String>,
+    expected_user_id: Option<UserId>,
 
     #[serde(default)]
     auth_state: AuthState,
@@ -132,6 +133,23 @@ impl Manager {
         debug!("User ID response: {:?}", maybe_user_id);
         let mut inner = self.inner.write().unwrap();
         inner.config.auth_state = AuthState::AuthResult(maybe_user_id);
+
+        // The user_id has changed so we reset the games.
+        if let Some(user_id) = maybe_user_id {
+            if let Some(expected_user_id) = inner.config.expected_user_id {
+                if expected_user_id != user_id {
+                    info!("Clearing games because user_id is different");
+                    self.clear_games().context("Clear games 1.")?
+                } else {
+                    debug!("Same user as last login.")
+                }
+            } else {
+                info!("Clearing games because of no previous user_id.");
+                self.clear_games().context("Clear games 2.")?
+            }
+            inner.config.expected_user_id = Some(user_id);
+        }
+
         self.save_config(&mut inner)?;
         Ok(maybe_user_id)
     }
@@ -156,7 +174,6 @@ impl Manager {
     /// It will also start downloading games if they don't exist.
     pub async fn refresh(&mut self) -> Result<()> {
         let games = self.api()?.get_games_and_players(&[]).await?;
-        dbg!("???? 1");
         self.save_games(games)?;
         // TODO
         // let unknown_players = self.filter_unknown_players();
@@ -194,6 +211,11 @@ impl Manager {
 
             if !game.is_user_id_turn(&user_id) {
                 trace!("Not my turn.");
+                continue;
+            }
+
+            if game.current_turn.is_first_turn {
+                trace!("First turn. There is nothing to download");
                 continue;
             }
 
