@@ -478,7 +478,7 @@ impl Manager {
         let turn_id = info.game.current_turn.turn_id;
         info!(?game_id);
 
-        let inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap();
         inner.state.insert(game_id, State::Uploading);
 
         let s = self.clone();
