@@ -42,6 +42,8 @@ impl Default for AuthState {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     auth_key: Option<String>,
+
+    #[serde(default)]
     auth_state: AuthState,
 }
 
@@ -118,8 +120,8 @@ impl Manager {
             db,
             inner: Default::default(),
         };
-        s.load_config()?;
-        s.load_games()?;
+        s.load_config().context("Loading config.")?;
+        s.load_games().context("Loading existing games.")?;
 
         Ok(s)
     }
@@ -579,8 +581,11 @@ impl Manager {
     }
 
     pub fn load_config(&mut self) -> Result<()> {
-        let config = match self.db.get(CONFIG_KEY)? {
-            Some(b) => serde_json::from_slice(&b)?,
+        let config = match self.db.get(CONFIG_KEY).context("Loading CONFIG_KEY.")? {
+            Some(b) => serde_json::from_slice(&b).with_context(|| {
+                let s = String::from_utf8(b.to_vec()).unwrap();
+                format!("Parsing JSON: {}", s)
+            })?,
             None => Config::default(),
         };
         self.inner.write().unwrap().config = config;

@@ -295,7 +295,7 @@ impl Api {
         let s = self.clone();
         tokio::spawn(async move {
             trace!("Starting upload.");
-            tx.send(UploadMessage::Started);
+            tx.send(UploadMessage::Started).await?;
 
             let auth_key = s.auth_key.clone();
             let form = Form::new()
@@ -322,7 +322,7 @@ impl Api {
                 return Err(anyhow!("Response returned 0 for an unknown reason."));
             }
 
-            tx.send(UploadMessage::Done);
+            tx.send(UploadMessage::Done).await?;
             Ok(())
         });
 
