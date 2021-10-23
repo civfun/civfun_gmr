@@ -180,7 +180,6 @@ impl Manager {
         // if unknown_players.len() > 0 {
         //     let data = self.api()?.get_games_and_players([]).await?;
         // }
-        self.start_downloads().await.unwrap();
         Ok(())
     }
 
@@ -190,48 +189,6 @@ impl Manager {
         } else {
             None
         }
-    }
-
-    #[instrument(skip(self))]
-    pub async fn start_downloads(&mut self) -> Result<Option<()>> {
-        // If we don't have a user_id, don't bother trying.
-        let user_id = match self.user_id() {
-            None => return Ok(None),
-            Some(u) => u,
-        };
-        let games = {
-            let inner = self.inner.read().unwrap();
-            inner.games.clone()
-        };
-
-        // TODO: Use inner.my_games()
-        for game in &games.games {
-            let span = trace_span!("", game = ?game.game_id);
-            let _enter = span.enter();
-
-            if !game.is_user_id_turn(&user_id) {
-                trace!("Not my turn.");
-                continue;
-            }
-
-            if game.current_turn.is_first_turn {
-                trace!("First turn. There is nothing to download");
-                continue;
-            }
-
-            {
-                let mut inner = self.inner.read().unwrap();
-                let state = inner.state.get(&game.game_id);
-                trace!(?state);
-                match state {
-                    None => {}
-                    Some(State::Idle) => {}
-                    _ => continue,
-                }
-            }
-        }
-
-        Ok(Some(())) // TODO: return something useful?
     }
 
     fn saved_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
@@ -427,10 +384,10 @@ impl Manager {
             trace!(?game_id, ?state);
 
             match state {
-                State::Idle => self.handle_idle(info).await?,
-                State::Downloading => self.handle_downloading(info).await?,
+                State::Idle => self.process_idle_state(info).await?,
+                State::Downloading => self.process_downloading_state(info).await?,
                 State::Downloaded => {}
-                State::UploadQueued => self.handle_upload_queued(info).await?,
+                State::UploadQueued => self.process_upload_queued(info).await?,
                 // State::Uploading => self.handle_uploading(&mut inner, game).await?,
                 // State::UploadComplete => self.handle_upload_complete(&mut inner, game).await?,
                 _ => todo!("{:?}", state),
@@ -440,7 +397,12 @@ impl Manager {
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_idle(&mut self, info: GameInfo) -> Result<()> {
+    async fn process_idle_state(&mut self, info: GameInfo) -> Result<()> {
+        if info.game.current_turn.is_first_turn {
+            // No save for first turn.
+            return Ok(());
+        }
+
         let path = Self::save_dir()?.join(Self::filename(&info.game)?);
         trace!(?path, "Downloading.");
         let (rx, handle) = self
@@ -454,7 +416,7 @@ impl Manager {
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_downloading(&mut self, info: GameInfo) -> Result<()> {
+    async fn process_downloading_state(&mut self, info: GameInfo) -> Result<()> {
         let game_id = &info.game.game_id;
         let turn_id = &info.game.current_turn.turn_id;
         let mut inner = self.inner.write().unwrap();
@@ -497,7 +459,7 @@ impl Manager {
     }
 
     #[instrument(skip(self, info))]
-    async fn handle_upload_queued(&mut self, info: GameInfo) -> Result<()> {
+    async fn process_upload_queued(&mut self, info: GameInfo) -> Result<()> {
         let game_id = info.game.game_id;
         let turn_id = info.game.current_turn.turn_id;
         info!(?game_id);

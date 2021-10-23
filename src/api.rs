@@ -200,7 +200,7 @@ impl Api {
         Ok(text)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, extra_query))]
     async fn get_json<T>(&self, endpoint: &str, extra_query: &[(&str, &str)]) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
@@ -215,6 +215,7 @@ impl Api {
     }
 
     /// Returns None when authentication has failed.
+    #[instrument(skip(self))]
     pub async fn authenticate_user(&self) -> anyhow::Result<Option<UserId>> {
         let text = self.get_text("AuthenticateUser", &[]).await?;
         if text == "null" {

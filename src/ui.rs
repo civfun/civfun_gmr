@@ -402,9 +402,9 @@ struct Games {}
 
 impl Games {
     fn view(&mut self, games: &[GameInfo]) -> Element<Message> {
-        let column = Column::new();
+        let mut column = Column::new();
         for info in games {
-            // column.push(Text::new(info.game.name.clone()));
+            column = column.push(Text::new(info.game.name.clone()));
         }
         column.into()
     }
