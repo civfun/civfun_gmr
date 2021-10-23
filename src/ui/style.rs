@@ -7,15 +7,15 @@ use crate::TITLE;
 
 const FA_SOLID_ICONS: Font = Font::External {
     name: "FA Solid Icons",
-    bytes: include_bytes!("../fonts/fa-solid-900.ttf"),
+    bytes: include_bytes!("../../fonts/fa-solid-900.ttf"),
 };
 
 const FA_BRANDS_ICONS: Font = Font::External {
     name: "FA Brand Icons",
-    bytes: include_bytes!("../fonts/fa-brands-400.ttf"),
+    bytes: include_bytes!("../../fonts/fa-brands-400.ttf"),
 };
 
-pub fn title() -> Element<'static, Message> {
+pub(super) fn title() -> Element<'static, Message> {
     Text::new(TITLE)
         .width(Length::Fill)
         .height(Length::Shrink)
@@ -30,7 +30,7 @@ fn button_side_pad() -> Space {
     Space::new(Length::Units(10), Length::Units(24))
 }
 
-pub fn button_row(icon: Option<Text>, text: Option<&str>) -> Row<Message> {
+pub(super) fn button_row(icon: Option<Text>, text: Option<&str>) -> Row<Message> {
     let mut row: Row<Message> = Row::new();
     if let Some(icon) = icon {
         row = row.push(button_side_pad()).push(icon);
@@ -56,15 +56,15 @@ fn icon(font: Font, unicode: char, size: u16) -> Text {
         .size(size)
 }
 
-pub fn cog_icon(size: u16) -> Text {
+pub(super) fn cog_icon(size: u16) -> Text {
     icon(FA_SOLID_ICONS, '', size)
 }
 
-pub fn steam_icon(size: u16) -> Text {
+pub(super) fn steam_icon(size: u16) -> Text {
     icon(FA_BRANDS_ICONS, '', size)
 }
 
-pub fn done_icon(size: u16) -> Text {
+pub(super) fn done_icon(size: u16) -> Text {
     icon(FA_SOLID_ICONS, '', size)
 }
 
@@ -72,31 +72,31 @@ fn text_colour() -> Color {
     Color::from_rgb(0.9, 0.9, 1.0)
 }
 
-pub fn black() -> Color {
+fn black() -> Color {
     Color::BLACK
 }
 
-pub fn black_50alpha() -> Color {
+fn black_50alpha() -> Color {
     Color::new(0.0, 0.0, 0.0, 0.5)
 }
 
-pub fn black_25alpha() -> Color {
+fn black_25alpha() -> Color {
     Color::new(0.0, 0.0, 0.0, 0.25)
 }
 
-pub fn grey_50alpha() -> Color {
+fn grey_50alpha() -> Color {
     Color::new(0.5, 0.5, 0.5, 0.5)
 }
 
-pub fn background_color() -> Color {
+pub(super) fn background_color() -> Color {
     Color::from_rgb(0.168, 0.243, 0.313)
 }
 
-pub fn normal_text(s: &str) -> Text {
+pub(super) fn normal_text(s: &str) -> Text {
     Text::new(s).color(text_colour())
 }
 
-pub struct ActionButtonStyle;
+pub(super) struct ActionButtonStyle;
 
 impl ActionButtonStyle {
     fn base() -> button::Style {

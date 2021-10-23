@@ -1,7 +1,3 @@
-use crate::style::{title, ActionButtonStyle};
-use crate::{style, TITLE, VERSION};
-use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
-use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
 use iced::container::{Style, StyleSheet};
 use iced::svg::Handle;
 use iced::window::Mode;
@@ -16,6 +12,19 @@ use tokio::task::spawn_blocking;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
+use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
+use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
+use enter_auth_key::AuthKeyScreen;
+use prefs::Prefs;
+use style::{button_row, cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle};
+
+use crate::ui::enter_auth_key::AuthKeyMessage;
+use crate::{TITLE, VERSION};
+
+mod enter_auth_key;
+mod prefs;
+mod style;
+
 pub fn run() -> anyhow::Result<()> {
     let settings = Settings {
         window: window::Settings {
@@ -29,8 +38,8 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(PartialEq)]
-enum Screen {
+#[derive(PartialEq, Debug, Clone)]
+pub enum Screen {
     NothingYet,
     Error(String),
     AuthKeyInput,
@@ -53,19 +62,18 @@ impl Default for Screen {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CivFunUi {
     screen: Screen,
     // settings_visible is not part of Screen so that screen can change while the settings are showing.
     settings_visible: bool,
 
-    err: Option<anyhow::Error>,
     status_text: String,
     manager: Option<Manager>,
 
     actions: Actions,
-    settings: UiSettings,
-    enter_auth_key: EnterAuthKey,
+    prefs: Prefs,
+    enter_auth_key: AuthKeyScreen,
     games: Games,
 
     scroll_state: scrollable::State,
@@ -76,16 +84,19 @@ pub struct CivFunUi {
 pub enum Message {
     ManagerLoaded(Manager),
     AuthResponse(Option<UserId>),
-    RequestRefresh,
+    SetScreen(Screen),
+    RequestRefresh(()),
     HasRefreshed(()),
     StartedWatching(()),
     ProcessTransfers,
     ProcessNewSaves,
-    AuthKeyInputChanged(String),
-    AuthKeySave,
+    // AuthKeyInputChanged(String),
+    // AuthKeySave,
     PlayCiv,
-    ShowSettings,
-    HideSettings,
+    SetSettingsVisibility(bool),
+
+    AuthKeyMessage(AuthKeyMessage),
+    AuthKeySave(String),
 }
 
 // TODO: Return Result<> (not anyhow::Result)
@@ -178,6 +189,24 @@ impl Application for CivFunUi {
                     self.screen = Screen::AuthKeyInput;
                 }
             }
+
+            AuthKeyMessage(message) => return self.enter_auth_key.update(message, _clipboard),
+
+            AuthKeySave(auth_key) => {
+                if let Some(ref mut manager) = self.manager {
+                    // TODO: unwrap
+                    manager.save_auth_key(&auth_key).unwrap();
+                    self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
+                    self.screen = Screen::Games;
+                    return Command::batch([
+                        Command::perform(async { Screen::Games }, Message::SetScreen),
+                        Command::perform(async { () }, Message::RequestRefresh),
+                    ]);
+                } else {
+                    error!("Manager not initialised while trying to save auth_key.");
+                }
+            }
+
             AuthResponse(Some(_)) => {
                 debug!("Authenticated");
                 self.screen = Screen::Games;
@@ -186,7 +215,10 @@ impl Application for CivFunUi {
                 debug!("Bad authentication");
                 self.screen = Screen::Error("Bad authentication".into());
             }
-            RequestRefresh => {
+            SetScreen(screen) => {
+                self.screen = screen;
+            }
+            RequestRefresh(()) => {
                 debug!("RequestRefresh");
                 self.status_text = "Refreshing...".into();
                 return fetch_cmd(&self.manager);
@@ -197,11 +229,6 @@ impl Application for CivFunUi {
             HasRefreshed(()) => {
                 debug!("HasRefreshed");
                 self.status_text = "".into();
-
-                // info!("Got games!!! {:?}", data);
-                // self.games = data.games;
-                // self.players = data.players;
-                // info!("games len {}", self.games.len());
             }
             ProcessTransfers => {
                 if let Some(ref mut manager) = self.manager {
@@ -216,35 +243,18 @@ impl Application for CivFunUi {
                     manager.process_new_saves().unwrap();
                 }
             }
-            AuthKeyInputChanged(s) => {
-                self.enter_auth_key.input_value = s;
-            }
-            AuthKeySave => {
-                if let Some(ref mut manager) = self.manager {
-                    // TODO: unwrap
-                    manager
-                        .save_auth_key(&self.enter_auth_key.input_value.trim())
-                        .unwrap();
-                    self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
-                    self.screen = Screen::Games;
-                    return fetch_cmd(&self.manager);
-                } else {
-                    error!("Manager not initialised while trying to save auth_key.");
-                }
-            }
             PlayCiv => {
                 // TODO: DX version from settings.
                 open::that("steam://rungameid/8930//%5Cdx9").unwrap(); // TODO: unwrap
             }
-            ShowSettings => self.settings_visible = true,
-            CloseSettings => self.settings_visible = false,
+            SetSettingsVisibility(v) => self.settings_visible = v,
         }
         Command::none()
     }
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh),
+            time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh(())),
             time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessTransfers),
             time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessNewSaves),
         ])
@@ -255,7 +265,7 @@ impl Application for CivFunUi {
             manager,
             screen,
             actions,
-            settings,
+            prefs: settings,
             settings_visible,
             scroll_state,
             enter_auth_key,
@@ -265,7 +275,7 @@ impl Application for CivFunUi {
 
         let mut content = match screen {
             Screen::NothingYet => Text::new("Something funny is going on!").into(),
-            Screen::AuthKeyInput => enter_auth_key.view(),
+            Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
             Screen::Games => match &self.manager {
                 Some(m) => games.view(m.games().as_slice()),
                 None => Text::new("No manager yet!").into(),
@@ -335,7 +345,7 @@ async fn prepare_manager() -> Manager {
     Manager::new().unwrap() // TODO: unwrap
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 struct Actions {
     start_button_state: button::State,
     settings_button_state: button::State,
@@ -345,16 +355,16 @@ impl Actions {
     fn view(&mut self) -> Element<Message> {
         let start_button = Button::new(
             &mut self.start_button_state,
-            style::button_row(Some(style::steam_icon(20)), Some("Play")),
+            button_row(Some(steam_icon(20)), Some("Play")),
         )
         .on_press(Message::PlayCiv)
         .style(ActionButtonStyle);
 
         let right_button = Button::new(
             &mut self.settings_button_state,
-            style::button_row(Some(style::cog_icon(20)), None),
+            button_row(Some(cog_icon(20)), None),
         )
-        .on_press(Message::ShowSettings)
+        .on_press(Message::SetSettingsVisibility(true))
         .style(ActionButtonStyle);
 
         // let content: Element<Self::Message> = if let Some(err) = &self.err {
@@ -394,7 +404,7 @@ impl Actions {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Games {}
 
 impl Games {
@@ -434,73 +444,5 @@ impl Games {
     }
     fn actions(info: GameInfo) -> Element<'static, Message> {
         Text::new("ACTIONS").into()
-    }
-}
-
-#[derive(Default)]
-struct EnterAuthKey {
-    input_state: text_input::State,
-    input_value: String,
-    button_state: button::State,
-}
-
-impl EnterAuthKey {
-    pub fn view(&mut self) -> Element<Message> {
-        let message = style::normal_text("Please enter your Authentication Key below.")
-            .horizontal_alignment(HorizontalAlignment::Center);
-
-        let input = TextInput::new(
-            &mut self.input_state,
-            "",
-            &self.input_value,
-            Message::AuthKeyInputChanged,
-        )
-        .padding(10)
-        .size(20);
-
-        let button = Button::new(
-            &mut self.button_state,
-            Text::new("Save")
-                .height(Length::Fill)
-                .vertical_alignment(VerticalAlignment::Center),
-        )
-        .on_press(Message::AuthKeySave);
-
-        Column::new()
-            .align_items(Align::Center)
-            .push(Space::new(Length::Fill, Length::Units(50)))
-            .push(message)
-            .push(Space::new(Length::Fill, Length::Units(10)))
-            .push(
-                Row::new()
-                    .max_width(250)
-                    .height(Length::Units(40))
-                    .push(input)
-                    .push(button.height(Length::Fill)),
-            )
-            .into()
-    }
-
-    fn background_color(&self) -> Color {
-        Color::from_rgb(0.168, 0.243, 0.313).into()
-    }
-}
-
-#[derive(Default)]
-struct UiSettings {
-    close_settings_button_state: button::State,
-    open_folder_button_state: button::State,
-}
-
-impl UiSettings {
-    fn view(&mut self) -> Element<Message> {
-        let close_button = Button::new(
-            &mut self.close_settings_button_state,
-            style::button_row(Some(style::done_icon(20)), Some("Done")),
-        )
-        .on_press(Message::HideSettings)
-        .style(ActionButtonStyle);
-
-        close_button.into()
     }
 }

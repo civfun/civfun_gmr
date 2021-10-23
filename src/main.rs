@@ -1,6 +1,5 @@
 use clap::{AppSettings, Clap};
 
-mod style;
 mod ui;
 
 pub const TITLE: &str = "civ.fun's Multiplayer Robot";
