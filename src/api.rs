@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, trace, trace_span};
 
-#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct UserId(u64);
 
 impl From<u64> for UserId {
@@ -231,7 +231,7 @@ impl Api {
 
     pub async fn get_games_and_players(
         &self,
-        player_ids: &[&UserId],
+        player_ids: &[UserId],
     ) -> anyhow::Result<GetGamesAndPlayers> {
         let player_id_text = player_ids
             .iter()

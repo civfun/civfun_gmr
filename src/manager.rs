@@ -1,5 +1,5 @@
 use crate::api::{
-    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, TurnId, UploadMessage, UserId,
+    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, Player, TurnId, UploadMessage, UserId,
 };
 use crate::{data_dir_path, project_dirs};
 use anyhow::anyhow;
@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
@@ -53,6 +53,13 @@ pub struct GameInfo {
     pub game: Game,
     pub download: Option<State>,
     pub parsed: Option<Civ5Save>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPlayer {
+    player: Player,
+    image_data: Vec<u8>,
+    last_downloaded: SystemTime,
 }
 
 #[derive(Debug, Default)]
@@ -174,13 +181,51 @@ impl Manager {
     /// It will also start downloading games if they don't exist.
     pub async fn refresh(&mut self) -> Result<()> {
         let games = self.api()?.get_games_and_players(&[]).await?;
-        self.save_games(games)?;
-        // TODO
-        // let unknown_players = self.filter_unknown_players();
-        // if unknown_players.len() > 0 {
-        //     let data = self.api()?.get_games_and_players([]).await?;
-        // }
+        self.save_games(&games)?;
+        let unknown_players = self
+            .filter_unknown_players(&games)
+            .context("Filter unknown players.")?;
+        if unknown_players.len() > 0 {
+            let data = self
+                .api()?
+                .get_games_and_players(unknown_players.as_slice())
+                .await?;
+            for player in data.players {
+                dbg!(player.avatar_url);
+            }
+            todo!();
+        }
         Ok(())
+    }
+
+    fn filter_unknown_players(&self, games: &GetGamesAndPlayers) -> Result<Vec<UserId>> {
+        let mut players: Vec<UserId> = games
+            .games
+            .iter()
+            .map(|g| g.players.iter().map(|p| p.user_id))
+            .flatten()
+            .collect();
+        players.sort();
+        players.dedup();
+
+        let mut needs_request = vec![];
+        for user_id in players {
+            let key = Self::player_info_key(user_id);
+            let data = self
+                .db
+                .get(&key)
+                .with_context(|| format!("Player info key: {}", &key))?;
+
+            match data {
+                Some(u) => {
+                    // TODO: Check the age of the avatar, e.g. 24 hours and add to needs_request.
+                }
+                None => {
+                    needs_request.push(user_id);
+                }
+            }
+        }
+        Ok(needs_request)
     }
 
     pub fn user_id(&self) -> Option<UserId> {
@@ -189,6 +234,10 @@ impl Manager {
         } else {
             None
         }
+    }
+
+    fn player_info_key(user_id: UserId) -> String {
+        format!("avatar-{}", user_id)
     }
 
     fn saved_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
@@ -245,8 +294,10 @@ impl Manager {
         let mut fp = File::open(&path)?;
         let mut data = Vec::with_capacity(1_000_000);
         fp.read_to_end(&mut data)?;
-        self.db
-            .insert(Self::saved_bytes_db_key(&game_id, &turn_id), data.clone())?;
+        self.db.insert(
+            Self::saved_bytes_db_key(&game_id, &turn_id),
+            data.as_slice(),
+        )?;
         inner.state.insert(game_id.clone(), State::Downloaded);
 
         self.analyse_download(inner, game_id, &data)?;
@@ -624,11 +675,11 @@ impl Manager {
         Ok(())
     }
 
-    pub fn save_games(&self, data: GetGamesAndPlayers) -> Result<()> {
+    pub fn save_games(&self, data: &GetGamesAndPlayers) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
         let encoded = serde_json::to_vec(&data)?;
         self.db.insert(GAME_API_RESPONSE_KEY, encoded.as_slice())?;
-        inner.games = data;
+        inner.games = data.clone();
         Ok(())
     }
 

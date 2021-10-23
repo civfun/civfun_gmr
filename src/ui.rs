@@ -8,8 +8,8 @@ use iced::window::Mode;
 use iced::{
     button, container, executor, scrollable, text_input, time, window, Align, Application,
     Background, Button, Clipboard, Color, Column, Command, Container, Element, Font,
-    HorizontalAlignment, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Svg, Text,
-    TextInput, VerticalAlignment,
+    HorizontalAlignment, Image, Length, Row, Rule, Scrollable, Settings, Space, Subscription, Svg,
+    Text, TextInput, VerticalAlignment,
 };
 use notify::DebouncedEvent;
 use tokio::task::spawn_blocking;
@@ -216,9 +216,6 @@ impl Application for CivFunUi {
                     manager.process_new_saves().unwrap();
                 }
             }
-            // Refreshed(Err(err)) => {
-            //     error!("error: {:?}", err);
-            // }
             AuthKeyInputChanged(s) => {
                 self.enter_auth_key.input_value = s;
             }
@@ -404,9 +401,39 @@ impl Games {
     fn view(&mut self, games: &[GameInfo]) -> Element<Message> {
         let mut column = Column::new();
         for info in games {
-            column = column.push(Text::new(info.game.name.clone()));
+            let el = Self::game(info.clone());
+            column = column.push(el)
         }
         column.into()
+    }
+
+    /*
+    +------+-------------------------+------------|
+    | [     ] | Title of the Game    | [ Upload ] |
+    | [     ] | 5d 2h left, 2d5h ago |            |
+    | [     ] | [ ] [ ] [ ] [ ]      |            |
+    +------+-------------------------+------------|
+     */
+    fn game(info: GameInfo) -> Element<'static, Message> {
+        Row::new()
+            .push(Self::avatar(info.clone()))
+            .push(Self::title_and_players(info.clone()))
+            .push(Self::actions(info.clone()))
+            .into()
+    }
+
+    fn avatar(info: GameInfo) -> Element<'static, Message> {
+        Text::new("AVATAR").width(Length::Units(50)).into()
+    }
+    fn title_and_players(info: GameInfo) -> Element<'static, Message> {
+        Column::new()
+            .push(Text::new(info.game.name))
+            .push(Text::new("PLAYERS PLAYER PLAYERS"))
+            .width(Length::Fill)
+            .into()
+    }
+    fn actions(info: GameInfo) -> Element<'static, Message> {
+        Text::new("ACTIONS").into()
     }
 }
 
