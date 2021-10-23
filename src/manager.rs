@@ -1,25 +1,26 @@
-use crate::api::{
-    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, Player, TurnId, UploadMessage, UserId,
-};
-use crate::{data_dir_path, project_dirs};
-use anyhow::anyhow;
-use anyhow::Context;
-use civ5save::{Civ5Save, Civ5SaveReader};
-use directories::BaseDirs;
-use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
+
+use anyhow::anyhow;
+use anyhow::Context;
+use civ5save::{Civ5Save, Civ5SaveReader};
+use directories::{BaseDirs, ProjectDirs};
+use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn};
+
+use crate::api::{
+    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, Player, TurnId, UploadMessage, UserId,
+};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -732,4 +733,12 @@ impl Manager {
         let games = inner.games();
         games.clone()
     }
+}
+
+fn project_dirs() -> anyhow::Result<ProjectDirs> {
+    Ok(ProjectDirs::from("", "civ.fun", "gmr").context("Could not determine ProjectDirs.")?)
+}
+
+pub(crate) fn data_dir_path(join: &Path) -> anyhow::Result<PathBuf> {
+    Ok(project_dirs()?.data_dir().join(join))
 }
