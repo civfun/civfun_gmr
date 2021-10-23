@@ -1,3 +1,10 @@
+use crate::ui::auth_key_screen::AuthKeyMessage;
+use crate::{TITLE, VERSION};
+use actions::Actions;
+use auth_key_screen::AuthKeyScreen;
+use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
+use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
+use games_list::GamesList;
 use iced::container::{Style, StyleSheet};
 use iced::svg::Handle;
 use iced::window::Mode;
@@ -8,20 +15,14 @@ use iced::{
     Text, TextInput, VerticalAlignment,
 };
 use notify::DebouncedEvent;
+use prefs::Prefs;
+use style::{button_row, cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle};
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
-
-use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
-use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
-use enter_auth_key::AuthKeyScreen;
-use prefs::Prefs;
-use style::{button_row, cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle};
-
-use crate::ui::enter_auth_key::AuthKeyMessage;
-use crate::{TITLE, VERSION};
-
-mod enter_auth_key;
+mod actions;
+mod auth_key_screen;
+mod games_list;
 mod prefs;
 mod style;
 
@@ -74,7 +75,7 @@ pub struct CivFunUi {
     actions: Actions,
     prefs: Prefs,
     enter_auth_key: AuthKeyScreen,
-    games: Games,
+    games: GamesList,
 
     scroll_state: scrollable::State,
     refresh_started_at: Option<Instant>,
@@ -345,104 +346,6 @@ async fn prepare_manager() -> Manager {
     Manager::new().unwrap() // TODO: unwrap
 }
 
-#[derive(Default, Debug, Clone)]
-struct Actions {
-    start_button_state: button::State,
-    settings_button_state: button::State,
-}
-
-impl Actions {
-    fn view(&mut self) -> Element<Message> {
-        let start_button = Button::new(
-            &mut self.start_button_state,
-            button_row(Some(steam_icon(20)), Some("Play")),
-        )
-        .on_press(Message::PlayCiv)
-        .style(ActionButtonStyle);
-
-        let right_button = Button::new(
-            &mut self.settings_button_state,
-            button_row(Some(cog_icon(20)), None),
-        )
-        .on_press(Message::SetSettingsVisibility(true))
-        .style(ActionButtonStyle);
-
-        // let content: Element<Self::Message> = if let Some(err) = &self.err {
-        //     Text::new(format!("Error: {:?}", err)).into()
-        // } else {
-        //     if self. == Yes {
-        //         // games_view(&self.manager)
-        //         Text::new("").into()
-        //     } else if self.has_auth_key == No {
-        //         let message = Text::new("no auth key pls enter");
-        //         let input = TextInput::new(
-        //             &mut self.auth_key_input_state,
-        //             "Type something...",
-        //             &self.auth_key_input_value,
-        //             Message::AuthKeyInputChanged,
-        //         )
-        //         .padding(10)
-        //         .size(20);
-        //         let status = Text::new("Updating...")
-        //             .vertical_alignment(VerticalAlignment::Center)
-        //             .horizontal_alignment(HorizontalAlignment::Center);
-        //
-        //         // let settings_button: Button<Message> =
-        //         //     Button::new(&mut self.settings_button_state, hmm.into()).into();
-        //
-        //     }
-        // };
-
-        let status = Text::new("testing");
-
-        Row::new()
-            .height(Length::Units(40))
-            .push(start_button.width(Length::Shrink))
-            .push(status.width(Length::Fill))
-            .push(right_button.width(Length::Shrink))
-            .into()
-    }
-}
-
-#[derive(Default, Debug)]
-struct Games {}
-
-impl Games {
-    fn view(&mut self, games: &[GameInfo]) -> Element<Message> {
-        let mut column = Column::new();
-        for info in games {
-            let el = Self::game(info.clone());
-            column = column.push(el)
-        }
-        column.into()
-    }
-
-    /*
-    +------+-------------------------+------------|
-    | [     ] | Title of the Game    | [ Upload ] |
-    | [     ] | 5d 2h left, 2d5h ago |            |
-    | [     ] | [ ] [ ] [ ] [ ]      |            |
-    +------+-------------------------+------------|
-     */
-    fn game(info: GameInfo) -> Element<'static, Message> {
-        Row::new()
-            .push(Self::avatar(info.clone()))
-            .push(Self::title_and_players(info.clone()))
-            .push(Self::actions(info.clone()))
-            .into()
-    }
-
-    fn avatar(info: GameInfo) -> Element<'static, Message> {
-        Text::new("AVATAR").width(Length::Units(50)).into()
-    }
-    fn title_and_players(info: GameInfo) -> Element<'static, Message> {
-        Column::new()
-            .push(Text::new(info.game.name))
-            .push(Text::new("PLAYERS PLAYER PLAYERS"))
-            .width(Length::Fill)
-            .into()
-    }
-    fn actions(info: GameInfo) -> Element<'static, Message> {
-        Text::new("ACTIONS").into()
-    }
+struct PlayerCache {
+    avatars: Rc<RefCell<HashMap<UserId, Player>>>,
 }

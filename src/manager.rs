@@ -1,10 +1,3 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
-use std::time::{Duration, SystemTime};
-
 use anyhow::anyhow;
 use anyhow::Context;
 use civ5save::{Civ5Save, Civ5SaveReader};
@@ -12,6 +5,12 @@ use directories::{BaseDirs, ProjectDirs};
 use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
@@ -221,8 +220,8 @@ impl Manager {
             image_data,
             last_downloaded: SystemTime::now(),
         };
-        let json = serde_json::to_vec(&stored_player).unwrap();
 
+        let json = serde_json::to_vec(&stored_player).unwrap();
         db.insert(key, json).unwrap();
     }
 
