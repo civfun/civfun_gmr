@@ -179,6 +179,7 @@ impl Manager {
 
     /// This will eventually fetch a second time if the players shown don't exist in the db.
     /// It will also start downloading games if they don't exist.
+    #[instrument(skip(self))]
     pub async fn refresh(&mut self) -> Result<()> {
         let games = self.api()?.get_games_and_players(&[]).await?;
         self.save_games(&games)?;
@@ -190,12 +191,38 @@ impl Manager {
                 .api()?
                 .get_games_and_players(unknown_players.as_slice())
                 .await?;
+
             for player in data.players {
-                dbg!(player.avatar_url);
+                debug!(avatar_url = ?player.avatar_url, "Fetching avatar.");
+                let db = self.db.clone();
+                let player = player.clone();
+                tokio::spawn(async move {
+                    Self::fetch_avatar(player, db).await;
+                });
             }
-            todo!();
         }
         Ok(())
+    }
+
+    #[instrument(skip(db))]
+    async fn fetch_avatar(player: Player, db: sled::Db) {
+        let image_data = reqwest::get(&player.avatar_url)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec();
+        let key = Self::player_info_key(&player.steam_id);
+
+        let stored_player = StoredPlayer {
+            player,
+            image_data,
+            last_downloaded: SystemTime::now(),
+        };
+        let json = serde_json::to_vec(&stored_player).unwrap();
+
+        db.insert(key, json).unwrap();
     }
 
     fn filter_unknown_players(&self, games: &GetGamesAndPlayers) -> Result<Vec<UserId>> {
@@ -210,7 +237,7 @@ impl Manager {
 
         let mut needs_request = vec![];
         for user_id in players {
-            let key = Self::player_info_key(user_id);
+            let key = Self::player_info_key(&user_id);
             let data = self
                 .db
                 .get(&key)
@@ -236,8 +263,8 @@ impl Manager {
         }
     }
 
-    fn player_info_key(user_id: UserId) -> String {
-        format!("avatar-{}", user_id)
+    fn player_info_key(user_id: &UserId) -> String {
+        format!("player-info-{}", user_id)
     }
 
     fn saved_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
