@@ -49,6 +49,7 @@ pub enum Screen {
     Error { message: String, next: Box<Screen> },
     AuthKeyInput,
     Games,
+    Settings,
 }
 
 impl Screen {
@@ -70,11 +71,11 @@ impl Default for Screen {
 #[derive(Debug)]
 pub struct CivFunUi {
     screen: Screen,
-    // settings_visible is not part of Screen so that screen can change while the settings are showing.
-    settings_visible: bool,
 
     status_text: String,
     manager: Manager,
+
+    settings_button_state: button::State,
 
     actions: Actions,
     prefs: Prefs,
@@ -97,7 +98,6 @@ pub enum Message {
     // AuthKeyInputChanged(String),
     // AuthKeySave,
     PlayCiv,
-    SetSettingsVisibility(bool),
 
     AuthKeyMessage(AuthKeyMessage),
     AuthKeySave(String),
@@ -161,7 +161,6 @@ impl Application for CivFunUi {
         let mut civfun = CivFunUi {
             manager,
             screen: Default::default(),
-            settings_visible: false,
             status_text: "".to_string(),
             actions: Default::default(),
             prefs: Default::default(),
@@ -169,6 +168,8 @@ impl Application for CivFunUi {
             games: Default::default(),
             scroll_state: Default::default(),
             refresh_started_at: None,
+
+            settings_button_state: Default::default(),
         };
 
         if civfun.manager.auth_ready() {
@@ -266,7 +267,6 @@ impl Application for CivFunUi {
                 // TODO: DX version from settings.
                 open::that("steam://rungameid/8930//%5Cdx9").unwrap(); // TODO: unwrap
             }
-            SetSettingsVisibility(v) => self.settings_visible = v,
         }
         Command::none()
     }
@@ -285,10 +285,10 @@ impl Application for CivFunUi {
             screen,
             actions,
             prefs: settings,
-            settings_visible,
             scroll_state,
             enter_auth_key,
             games,
+            ref mut settings_button_state,
             ..
         } = self;
 
@@ -296,12 +296,9 @@ impl Application for CivFunUi {
             Screen::NothingYet => Text::new("Something funny is going on!").into(),
             Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
             Screen::Games => games.view(manager.games().as_slice()),
+            Screen::Settings => settings.view(),
             Screen::Error { message, next } => Text::new(format!("Error!\n\n{}", message)).into(),
         };
-
-        if *settings_visible {
-            content = settings.view();
-        }
 
         // // TODO: Turn content to scrollable
         // let content = Scrollable::new(&mut scroll)
@@ -309,12 +306,19 @@ impl Application for CivFunUi {
         //     .height(Length::Fill)
         //     .push(content);
 
-        let mut layout = Column::new();
-        layout = layout.push(title());
-        if !*settings_visible && screen.should_show_actions() {
-            layout = layout.push(actions.view());
-        }
-        layout = layout.push(content);
+        let settings_button =
+            Button::new(settings_button_state, button_row(Some(cog_icon(20)), None))
+                .on_press(Message::SetScreen(Screen::Settings))
+                .style(ActionButtonStyle);
+        let title_row = Row::new()
+            .height(Length::Units(40))
+            .push(title())
+            .push(settings_button);
+
+        let layout = Column::new()
+            .push(title_row)
+            .push(actions.view())
+            .push(content);
 
         let outside = Container::new(layout)
             .width(Length::Fill)
