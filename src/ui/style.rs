@@ -1,9 +1,15 @@
 use iced::{
-    button, Color, Element, Font, HorizontalAlignment, Length, Row, Space, Text, VerticalAlignment,
+    button, Align, Application, Button, Color, Column, Container, Element, Font,
+    HorizontalAlignment, Length, Row, Space, Text, VerticalAlignment,
 };
 
 use crate::ui::Message;
 use crate::TITLE;
+
+pub const ROW_HEIGHT: u16 = 40;
+pub const NORMAL_ICON_SIZE: u16 = 20;
+
+pub const RELAXED_PADDING: u16 = 20;
 
 const FA_SOLID_ICONS: Font = Font::External {
     name: "FA Solid Icons",
@@ -15,7 +21,24 @@ const FA_BRANDS_ICONS: Font = Font::External {
     bytes: include_bytes!("../../fonts/fa-brands-400.ttf"),
 };
 
-pub(super) fn title() -> Element<'static, Message> {
+pub fn centered_column<'a, M>() -> Column<'a, M> {
+    Column::new()
+        .width(Length::Fill)
+        .align_items(Align::Center)
+        .spacing(RELAXED_PADDING)
+}
+
+pub fn vertically_centered_content<'a, M, E>(e: E) -> Container<'a, M>
+where
+    E: Into<Element<'a, M>>,
+{
+    Container::new(e.into())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(Align::Center)
+}
+
+pub fn title() -> Element<'static, Message> {
     Text::new(TITLE)
         .width(Length::Fill)
         .height(Length::Shrink)
@@ -30,19 +53,57 @@ fn button_side_pad() -> Space {
     Space::new(Length::Units(10), Length::Units(24))
 }
 
-pub(super) fn button_row(icon: Option<Text>, text: Option<&str>) -> Row<Message> {
-    let mut row: Row<Message> = Row::new();
+pub enum ButtonView<'a> {
+    Text(&'a str),
+    Icon(Text),
+    TextIcon(&'a str, Text),
+}
+
+impl<'a> ButtonView<'a> {
+    fn parts(self) -> (Option<&'a str>, Option<Text>) {
+        (
+            match self {
+                ButtonView::Text(t) => Some(t),
+                ButtonView::Icon(_) => None,
+                ButtonView::TextIcon(t, _) => Some(t),
+            },
+            match self {
+                ButtonView::Text(_) => None,
+                ButtonView::Icon(i) => Some(i),
+                ButtonView::TextIcon(_, i) => Some(i),
+            },
+        )
+    }
+}
+
+fn button_row<'a, M: 'a>(view: ButtonView) -> Row<'a, M> {
+    let mut row: Row<M> = Row::new().height(Length::Units(ROW_HEIGHT));
+    let (text, icon) = view.parts();
     if let Some(icon) = icon {
         row = row.push(button_side_pad()).push(icon);
     }
     if let Some(text) = text {
         row = row.push(button_side_pad()).push(
-            Text::new(text)
+            normal_text(text)
                 .vertical_alignment(VerticalAlignment::Center)
                 .height(Length::Fill),
         );
     }
     row.push(button_side_pad())
+}
+
+pub fn action_button<'a, M: 'a>(
+    view: ButtonView,
+    message: M,
+    state: &'a mut button::State,
+) -> Button<'a, M>
+where
+    M: Clone,
+{
+    Button::new(state, button_row(view))
+        .on_press(message)
+        .style(ActionButtonStyle)
+        .into()
 }
 
 fn icon(font: Font, unicode: char, size: u16) -> Text {
@@ -56,15 +117,15 @@ fn icon(font: Font, unicode: char, size: u16) -> Text {
         .size(size)
 }
 
-pub(super) fn cog_icon(size: u16) -> Text {
+pub fn cog_icon(size: u16) -> Text {
     icon(FA_SOLID_ICONS, '', size)
 }
 
-pub(super) fn steam_icon(size: u16) -> Text {
+pub fn steam_icon(size: u16) -> Text {
     icon(FA_BRANDS_ICONS, '', size)
 }
 
-pub(super) fn done_icon(size: u16) -> Text {
+pub fn done_icon(size: u16) -> Text {
     icon(FA_SOLID_ICONS, '', size)
 }
 
@@ -88,15 +149,19 @@ fn grey_50alpha() -> Color {
     Color::new(0.5, 0.5, 0.5, 0.5)
 }
 
-pub(super) fn background_color() -> Color {
+pub fn background_color() -> Color {
     Color::from_rgb(0.168, 0.243, 0.313)
 }
 
-pub(super) fn normal_text(s: &str) -> Text {
+pub fn title_text(s: &str) -> Text {
+    Text::new(s).color(text_colour()).size(40)
+}
+
+pub fn normal_text(s: &str) -> Text {
     Text::new(s).color(text_colour())
 }
 
-pub(super) struct ActionButtonStyle;
+pub struct ActionButtonStyle;
 
 impl ActionButtonStyle {
     fn base() -> button::Style {

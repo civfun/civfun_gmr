@@ -1,10 +1,3 @@
-use crate::ui::auth_key_screen::AuthKeyMessage;
-use crate::{TITLE, VERSION};
-use actions::Actions;
-use auth_key_screen::AuthKeyScreen;
-use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
-use civfun_gmr::manager::{AuthState, Config, Event, GameInfo, Manager};
-use games_list::GamesList;
 use iced::container::{Style, StyleSheet};
 use iced::svg::Handle;
 use iced::window::Mode;
@@ -15,13 +8,26 @@ use iced::{
     Text, TextInput, VerticalAlignment,
 };
 use notify::DebouncedEvent;
-use prefs::Prefs;
-use style::{button_row, cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle};
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace, warn};
+
+use actions::Actions;
+use auth_key_screen::AuthKeyScreen;
+use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
+use civfun_gmr::manager::{AuthState, Config, Event, GameInfo, Manager};
+use error_screen::ErrorScreen;
+use games_list::GamesList;
+use prefs::Prefs;
+use style::{cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle, ROW_HEIGHT};
+
+use crate::ui::auth_key_screen::AuthKeyMessage;
+use crate::ui::style::{action_button, ButtonView, NORMAL_ICON_SIZE};
+use crate::{TITLE, VERSION};
+
 mod actions;
 mod auth_key_screen;
+mod error_screen;
 mod games_list;
 mod prefs;
 mod style;
@@ -78,12 +84,12 @@ pub struct CivFunUi {
     settings_button_state: button::State,
 
     actions: Actions,
+    error: ErrorScreen,
     prefs: Prefs,
     enter_auth_key: AuthKeyScreen,
     games: GamesList,
 
     scroll_state: scrollable::State,
-    refresh_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,9 +154,6 @@ pub enum Message {
 //         Message::StartedWatching,
 //     ) // TODO: unwrap
 // }
-// async fn authenticate(mut manager: Manager) -> Option<UserId> {
-//     manager.authenticate().await.unwrap()
-// }
 
 impl Application for CivFunUi {
     type Executor = executor::Default;
@@ -162,13 +165,12 @@ impl Application for CivFunUi {
             manager,
             screen: Default::default(),
             status_text: "".to_string(),
+            error: Default::default(),
             actions: Default::default(),
             prefs: Default::default(),
             enter_auth_key: Default::default(),
             games: Default::default(),
             scroll_state: Default::default(),
-            refresh_started_at: None,
-
             settings_button_state: Default::default(),
         };
 
@@ -191,7 +193,7 @@ impl Application for CivFunUi {
         format!("{} v{}", TITLE, VERSION)
     }
 
-    #[instrument(skip(self, _clipboard, message))]
+    #[instrument(skip(self, _clipboard))]
     fn update(
         &mut self,
         message: Self::Message,
@@ -204,6 +206,7 @@ impl Application for CivFunUi {
                     match event {
                         // Event::AuthenticationSuccess => {}
                         Event::AuthenticationFailure => {
+                            trace!("yoooooo");
                             self.screen = Screen::Error {
                                 message: "Authentication Key error".to_string(),
                                 next: Box::new(Screen::AuthKeyInput),
@@ -283,6 +286,7 @@ impl Application for CivFunUi {
         let Self {
             manager,
             screen,
+            error,
             actions,
             prefs: settings,
             scroll_state,
@@ -293,11 +297,14 @@ impl Application for CivFunUi {
         } = self;
 
         let mut content = match screen {
-            Screen::NothingYet => Text::new("Something funny is going on!").into(),
+            Screen::NothingYet => normal_text("Loading...").into(),
             Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
             Screen::Games => games.view(manager.games().as_slice()),
             Screen::Settings => settings.view(),
-            Screen::Error { message, next } => Text::new(format!("Error!\n\n{}", message)).into(),
+            Screen::Error {
+                message: text,
+                next,
+            } => error.view(&text, *next.clone()),
         };
 
         // // TODO: Turn content to scrollable
@@ -305,20 +312,32 @@ impl Application for CivFunUi {
         //     .width(Length::Fill)
         //     .height(Length::Fill)
         //     .push(content);
+        //
+        // let settings_button = Button::new(
+        //     settings_button_state,
+        //     button_row(ButtonView::Icon(cog_icon(NORMAL_ICON_SIZE))),
+        // )
+        // .on_press(Message::SetScreen(Screen::Settings))
+        // .style(ActionButtonStyle);
 
-        let settings_button =
-            Button::new(settings_button_state, button_row(Some(cog_icon(20)), None))
-                .on_press(Message::SetScreen(Screen::Settings))
-                .style(ActionButtonStyle);
+        let settings_button = action_button(
+            ButtonView::Icon(cog_icon(NORMAL_ICON_SIZE)),
+            Message::SetScreen(Screen::Settings),
+            settings_button_state,
+        );
+
         let title_row = Row::new()
-            .height(Length::Units(40))
+            .height(Length::Units(ROW_HEIGHT))
             .push(title())
             .push(settings_button);
 
-        let layout = Column::new()
-            .push(title_row)
-            .push(actions.view())
-            .push(content);
+        let actions = if screen.should_show_actions() {
+            actions.view()
+        } else {
+            Space::new(Length::Shrink, Length::Shrink).into()
+        };
+
+        let layout = Column::new().push(title_row).push(actions).push(content);
 
         let outside = Container::new(layout)
             .width(Length::Fill)

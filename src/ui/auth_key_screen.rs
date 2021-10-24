@@ -4,7 +4,10 @@ use iced::{
 };
 use tracing::error;
 
-use crate::ui::style::normal_text;
+use crate::ui::style::{
+    action_button, centered_column, normal_text, title_text, vertically_centered_content,
+    ButtonView, ROW_HEIGHT,
+};
 use crate::ui::{Message, Screen};
 
 #[derive(Default, Debug)]
@@ -40,8 +43,8 @@ impl AuthKeyScreen {
     }
 
     pub fn view(&mut self) -> Element<AuthKeyMessage> {
-        let message = normal_text("Please enter your Authentication Key below.")
-            .horizontal_alignment(HorizontalAlignment::Center);
+        let title = title_text("Authentication");
+        let message = normal_text("Please enter your Authentication Key below.");
 
         let input = TextInput::new(
             &mut self.input_state,
@@ -52,26 +55,27 @@ impl AuthKeyScreen {
         .padding(10)
         .size(20);
 
-        let button = Button::new(
-            &mut self.button_state,
-            Text::new("Save")
-                .height(Length::Fill)
-                .vertical_alignment(VerticalAlignment::Center),
-        )
-        .on_press(AuthKeyMessage::Save);
+        // let button = Button::new(
+        //     &mut self.button_state,
+        //     Text::new("Save")
+        //         .height(Length::Fill)
+        //         .vertical_alignment(VerticalAlignment::Center),
+        // )
+        // .on_press(AuthKeyMessage::Save);
 
-        Column::new()
-            .align_items(Align::Center)
-            .push(Space::new(Length::Fill, Length::Units(50)))
-            .push(message)
-            .push(Space::new(Length::Fill, Length::Units(10)))
-            .push(
-                Row::new()
-                    .max_width(250)
-                    .height(Length::Units(40))
-                    .push(input)
-                    .push(button.height(Length::Fill)),
-            )
+        let button = action_button(
+            ButtonView::Text("Save"),
+            AuthKeyMessage::Save,
+            &mut self.button_state,
+        );
+
+        let input_row = Row::new()
+            .max_width(250)
+            .height(Length::Units(ROW_HEIGHT))
+            .push(input)
+            .push(button);
+
+        vertically_centered_content(centered_column().push(title).push(message).push(input_row))
             .into()
     }
 
