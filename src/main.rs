@@ -1,3 +1,4 @@
+use civfun_gmr::manager::Manager;
 use clap::{AppSettings, Clap};
 
 mod ui;
@@ -27,14 +28,14 @@ fn main() -> anyhow::Result<()> {
     // let opts: Opts = Opts::parse();
     // let gmr = Client::new(&opts.auth_key);
     // dbg!(gmr.get_games_and_players().await.unwrap());
-    // let manager = Manager::new()?;
+    let manager = Manager::new()?;
     // let config = manager.get_or_create_config()?;
     // dbg!(&config);
     // let games = gmr.games().await?;
     // gmr.download(games[0].game_id).await?;
     // let path = gmr.check_for_new_save().await?;
 
-    ui::run()?;
+    ui::run(manager)?;
 
     Ok(())
 }

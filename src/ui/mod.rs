@@ -19,21 +19,25 @@ use prefs::Prefs;
 use style::{button_row, cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle};
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 mod actions;
 mod auth_key_screen;
 mod games_list;
 mod prefs;
 mod style;
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(manager: Manager) -> anyhow::Result<()> {
     let settings = Settings {
         window: window::Settings {
             size: (400, 400),
             min_size: Some((400, 200)),
             ..Default::default()
         },
-        ..Default::default()
+        flags: manager,
+        default_font: Default::default(),
+        default_text_size: 20,
+        exit_on_close_request: true,
+        antialiasing: true,
     };
     CivFunUi::run(settings)?;
     Ok(())
@@ -63,14 +67,14 @@ impl Default for Screen {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct CivFunUi {
     screen: Screen,
     // settings_visible is not part of Screen so that screen can change while the settings are showing.
     settings_visible: bool,
 
     status_text: String,
-    manager: Option<Manager>,
+    manager: Manager,
 
     actions: Actions,
     prefs: Prefs,
@@ -83,7 +87,7 @@ pub struct CivFunUi {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    ManagerLoaded(Manager),
+    GetManagerEvents,
     AuthResponse(Option<UserId>),
     SetScreen(Screen),
     RequestRefresh(()),
@@ -100,66 +104,87 @@ pub enum Message {
     AuthKeySave(String),
 }
 
-// TODO: Return Result<> (not anyhow::Result)
-async fn fetch(mut manager: Manager) {
-    manager.refresh().await.unwrap(); // TODO: unwrap
-}
-
-#[instrument(skip(manager))]
-fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
-    debug!("Attempt to fetch.");
-    let manager = match manager {
-        Some(ref m) => m.clone(),
-        None => {
-            warn!("Manager not set while trying to fetch.");
-            return Command::none();
-        }
-    };
-
-    let is_auth_ready = manager.auth_ready();
-    if !is_auth_ready {
-        return Command::none();
-    }
-
-    let mut manager = manager.clone();
-    Command::perform(
-        async {
-            fetch(manager).await;
-        },
-        Message::HasRefreshed,
-    )
-}
-
-#[instrument(skip(manager))]
-fn watch_cmd(manager: &Option<Manager>) -> Command<Message> {
-    let manager = match manager {
-        Some(ref m) => m.clone(),
-        None => {
-            warn!("Manager not set while trying to fetch.");
-            return Command::none();
-        }
-    };
-
-    Command::perform(
-        async move { manager.start_watching_saves().await.unwrap() },
-        Message::StartedWatching,
-    ) // TODO: unwrap
-}
-
-async fn authenticate(mut manager: Manager) -> Option<UserId> {
-    manager.authenticate().await.unwrap()
-}
+// // TODO: Return Result<> (not anyhow::Result)
+// async fn fetch(mut manager: Manager) {
+//     manager.refresh().await.unwrap(); // TODO: unwrap
+// }
+//
+// #[instrument(skip(manager))]
+// fn fetch_cmd(manager: &Option<Manager>) -> Command<Message> {
+//     debug!("Attempt to fetch.");
+//     let manager = match manager {
+//         Some(ref m) => m.clone(),
+//         None => {
+//             warn!("Manager not set while trying to fetch.");
+//             return Command::none();
+//         }
+//     };
+//
+//     let is_auth_ready = manager.auth_ready();
+//     if !is_auth_ready {
+//         return Command::none();
+//     }
+//
+//     let mut manager = manager.clone();
+//     Command::perform(
+//         async {
+//             fetch(manager).await;
+//         },
+//         Message::HasRefreshed,
+//     )
+// }
+//
+// #[instrument(skip(manager))]
+// fn watch_cmd(manager: &Option<Manager>) -> Command<Message> {
+//     let manager = match manager {
+//         Some(ref m) => m.clone(),
+//         None => {
+//             warn!("Manager not set while trying to fetch.");
+//             return Command::none();
+//         }
+//     };
+//
+//     Command::perform(
+//         async move { manager.start_watching_saves().await.unwrap() },
+//         Message::StartedWatching,
+//     ) // TODO: unwrap
+// }
+// async fn authenticate(mut manager: Manager) -> Option<UserId> {
+//     manager.authenticate().await.unwrap()
+// }
 
 impl Application for CivFunUi {
     type Executor = executor::Default;
     type Message = Message;
-    type Flags = ();
+    type Flags = Manager;
 
-    fn new(_flags: ()) -> (CivFunUi, Command<Self::Message>) {
-        (
-            CivFunUi::default(),
-            Command::perform(prepare_manager(), Message::ManagerLoaded),
-        )
+    fn new(manager: Manager) -> (CivFunUi, Command<Self::Message>) {
+        let mut civfun = CivFunUi {
+            manager,
+            screen: Default::default(),
+            settings_visible: false,
+            status_text: "".to_string(),
+            actions: Default::default(),
+            prefs: Default::default(),
+            enter_auth_key: Default::default(),
+            games: Default::default(),
+            scroll_state: Default::default(),
+            refresh_started_at: None,
+        };
+
+        if civfun.manager.auth_ready() {
+            debug!("☑ Has auth key.");
+            // civfun.status_text = "Refreshing...".into();
+            // return Command::batch([
+            //     // fetch_cmd(&Some(manager.clone())),
+            //     // watch_cmd(&Some(manager.clone())),
+            //     // Command::perform(authenticate(manager.clone()), AuthResponse),
+            // ]);
+        } else {
+            civfun.screen = Screen::AuthKeyInput;
+        }
+
+        (civfun, Command::none())
     }
 
     fn title(&self) -> String {
@@ -174,38 +199,28 @@ impl Application for CivFunUi {
     ) -> Command<Self::Message> {
         use Message::*;
         match message {
-            ManagerLoaded(mut manager) => {
-                debug!("ManagerLoaded");
-                self.manager = Some(manager.clone());
-
-                if manager.auth_ready() {
-                    debug!("☑ Has auth key.");
-                    self.status_text = "Refreshing...".into();
-                    return Command::batch([
-                        fetch_cmd(&Some(manager.clone())),
-                        watch_cmd(&Some(manager.clone())),
-                        Command::perform(authenticate(manager.clone()), AuthResponse),
-                    ]);
-                } else {
-                    self.screen = Screen::AuthKeyInput;
-                }
+            GetManagerEvents => {
+                // while let Some(event) = self.manager.get_events() {
+                //     self.update()
+                // }
             }
 
             AuthKeyMessage(message) => return self.enter_auth_key.update(message, _clipboard),
 
             AuthKeySave(auth_key) => {
-                if let Some(ref mut manager) = self.manager {
-                    // TODO: unwrap
-                    manager.save_auth_key(&auth_key).unwrap();
-                    self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
-                    self.screen = Screen::Games;
-                    return Command::batch([
-                        Command::perform(async { Screen::Games }, Message::SetScreen),
-                        Command::perform(async { () }, Message::RequestRefresh),
-                    ]);
-                } else {
-                    error!("Manager not initialised while trying to save auth_key.");
-                }
+                // if let Some(ref mut manager) = self.manager {
+                //     // TODO: unwrap
+                //     manager.save_auth_key(&auth_key).unwrap();
+                //     self.status_text = "Refreshing...".into(); // TODO: make a fn for these two.
+                //     self.screen = Screen::Games;
+                //     return Command::batch([
+                //         Command::perform(async { Screen::Games }, Message::SetScreen),
+                //         Command::perform(async { () }, Message::RequestRefresh),
+                //     ]);
+                // } else {
+                //     error!("Manager not initialised while trying to save auth_key.");
+                // }
+                self.manager.authenticate(&auth_key);
             }
 
             AuthResponse(Some(_)) => {
@@ -221,8 +236,9 @@ impl Application for CivFunUi {
             }
             RequestRefresh(()) => {
                 debug!("RequestRefresh");
+                todo!();
                 self.status_text = "Refreshing...".into();
-                return fetch_cmd(&self.manager);
+                // return fetch_cmd(&self.manager);
             }
             StartedWatching(()) => {
                 debug!("StartedWatching");
@@ -232,17 +248,19 @@ impl Application for CivFunUi {
                 self.status_text = "".into();
             }
             ProcessTransfers => {
-                if let Some(ref mut manager) = self.manager {
-                    let mut manager = manager.clone();
-                    tokio::spawn(async move {
-                        manager.process_transfers().await.unwrap();
-                    });
-                }
+                // if let Some(ref mut manager) = self.manager {
+                //     let mut manager = manager.clone();
+                //     tokio::spawn(async move {
+                //         manager.process_transfers().await.unwrap();
+                //     });
+                // }
+                todo!()
             }
             ProcessNewSaves => {
-                if let Some(ref mut manager) = self.manager {
-                    manager.process_new_saves().unwrap();
-                }
+                todo!()
+                // if let Some(ref mut manager) = self.manager {
+                //     manager.process_new_saves().unwrap();
+                // }
             }
             PlayCiv => {
                 // TODO: DX version from settings.
@@ -255,9 +273,9 @@ impl Application for CivFunUi {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh(())),
-            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessTransfers),
-            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessNewSaves),
+            // time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh(())),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::GetManagerEvents),
+            // time::every(std::time::Duration::from_millis(1000)).map(|_| Message::ProcessNewSaves),
         ])
     }
 
@@ -277,10 +295,7 @@ impl Application for CivFunUi {
         let mut content = match screen {
             Screen::NothingYet => Text::new("Something funny is going on!").into(),
             Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
-            Screen::Games => match &self.manager {
-                Some(m) => games.view(m.games().as_slice()),
-                None => Text::new("No manager yet!").into(),
-            },
+            Screen::Games => games.view(manager.games().as_slice()),
             Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
         };
 
@@ -288,18 +303,16 @@ impl Application for CivFunUi {
             content = settings.view();
         }
 
-        // TODO: Turn content to scrollable
-        // let content = Scrollable::new(&mut self.scroll)
+        // // TODO: Turn content to scrollable
+        // let content = Scrollable::new(&mut scroll)
         //     .width(Length::Fill)
         //     .height(Length::Fill)
-        //     .push(content());
-
-        // let mut actions = Actions::default();
+        //     .push(content);
 
         let mut layout = Column::new();
         layout = layout.push(title());
         if !*settings_visible && screen.should_show_actions() {
-            layout = layout.push(self.actions.view());
+            layout = layout.push(actions.view());
         }
         layout = layout.push(content);
 
@@ -308,7 +321,9 @@ impl Application for CivFunUi {
             .height(Length::Fill)
             .padding(10);
 
-        return outside.into();
+        let hmm: Element<Self::Message> = outside.into();
+        hmm.explain(Color::WHITE)
+
         // return mock_view(&mut self.actions);
 
         // let mut layout = Column::new()
@@ -344,8 +359,4 @@ impl Application for CivFunUi {
 // TODO: Result<Manager> (not anyhow::Result because Message needs to be Clone)
 async fn prepare_manager() -> Manager {
     Manager::new().unwrap() // TODO: unwrap
-}
-
-struct PlayerCache {
-    avatars: Rc<RefCell<HashMap<UserId, Player>>>,
 }

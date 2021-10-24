@@ -8,10 +8,10 @@ use crate::ui::Message;
 pub struct GamesList {}
 
 impl GamesList {
-    fn view(&mut self, games: &[GameInfo], avatars: &Avatars) -> Element<Message> {
+    pub fn view(&mut self, games: &[GameInfo]) -> Element<Message> {
         let mut column = Column::new();
         for info in games {
-            let el = Self::game(info.clone(), avatars.clone());
+            let el = Self::game(info.clone());
             column = column.push(el)
         }
         column.into()

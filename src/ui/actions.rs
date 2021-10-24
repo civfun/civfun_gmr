@@ -10,7 +10,7 @@ pub struct Actions {
 }
 
 impl Actions {
-    fn view(&mut self) -> Element<Message> {
+    pub fn view(&mut self) -> Element<Message> {
         let start_button = Button::new(
             &mut self.start_button_state,
             button_row(Some(steam_icon(20)), Some("Play")),

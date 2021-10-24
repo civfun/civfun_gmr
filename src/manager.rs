@@ -11,9 +11,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn};
 
@@ -110,10 +110,24 @@ pub enum State {
     UploadComplete,
 }
 
-#[derive(Debug, Clone)]
+pub enum Event {
+    AuthenticationSuccess,
+    AuthenticationFailure,
+    UpdatedGames(Vec<GameInfo>),
+    // UpdatedPlayers(Vec<StoredPlayer>),
+}
+
+//
+// pub enum Request {
+//     SetAuthKey(String),
+// }
+//
+#[derive(Debug)]
 pub struct Manager {
     db: sled::Db,
     inner: Arc<RwLock<Inner>>,
+
+    auth_rx: Option<oneshot::Receiver<Option<UserId>>>,
 }
 
 impl Manager {
@@ -127,6 +141,7 @@ impl Manager {
         let mut s = Self {
             db,
             inner: Default::default(),
+            auth_rx: None,
         };
         s.load_config().context("Loading config.")?;
         s.load_games().context("Loading existing games.")?;
@@ -134,10 +149,34 @@ impl Manager {
         Ok(s)
     }
 
-    #[instrument(skip(self))]
-    pub async fn authenticate(&mut self) -> Result<Option<UserId>> {
-        let maybe_user_id = self.api()?.authenticate_user().await?;
-        debug!("User ID response: {:?}", maybe_user_id);
+    pub fn process(&mut self) {
+        if let Some(ref mut rx) = self.auth_rx {
+            if let Ok(msg) = rx.try_recv() {
+                self.handle_auth_response(msg);
+            }
+        }
+    }
+
+    #[instrument(skip(self, key))]
+    pub fn authenticate(&mut self, key: &str) {
+        let (tx, rx) = oneshot::channel();
+        self.auth_rx = Some(rx);
+
+        let mut inner = self.inner.write().unwrap();
+
+        inner.config.auth_key = Some(key.to_string());
+        // This shouldn't panic because we just gave the API key.
+        // TODO: Maybe be more explicit when getting an api instance, instead of calling self.api()?
+        let api = self.api().unwrap();
+
+        tokio::spawn(async move {
+            let maybe_user_id = api.authenticate_user().await.unwrap();
+            debug!(?maybe_user_id, "User ID response");
+            tx.send(maybe_user_id).unwrap();
+        });
+    }
+
+    fn handle_auth_response(&mut self, maybe_user_id: Option<UserId>) -> Result<Option<Event>> {
         let mut inner = self.inner.write().unwrap();
         inner.config.auth_state = AuthState::AuthResult(maybe_user_id);
 
@@ -158,7 +197,8 @@ impl Manager {
         }
 
         self.save_config(&mut inner)?;
-        Ok(maybe_user_id)
+
+        Ok(Some(Event::AuthenticationSuccess))
     }
 
     /// Ready means we have an auth key and a user id.
@@ -354,37 +394,38 @@ impl Manager {
         let save_dir = Self::save_dir().unwrap();
         debug!(?save_dir);
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
-        watcher.watch(save_dir, RecursiveMode::NonRecursive)?;
-
-        let s = self.clone();
-        tokio::spawn(async move {
-            // Move watcher into here, since it would be dropped otherwise and then the channel
-            // would be dropped.
-            let _ = watcher;
-
-            trace!("Loop started.");
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => {
-                        info!(?event);
-                        if let DebouncedEvent::Create(path) = event {
-                            let mut inner = s.inner.write().unwrap();
-                            let filename = path.file_name().unwrap().to_str().unwrap().into();
-                            inner.new_files_seen.push(filename);
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        warn!("Disconnected");
-                        return;
-                    }
-                }
-
-                tokio::task::yield_now().await;
-            }
-        });
+        // let (tx, rx) = std::sync::mpsc::channel();
+        // let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
+        // watcher.watch(save_dir, RecursiveMode::NonRecursive)?;
+        //
+        // // let s = self.clone();
+        // tokio::spawn(async move {
+        //     // Move watcher into here, since it would be dropped otherwise and then the channel
+        //     // would be dropped.
+        //     let _ = watcher;
+        //
+        //     trace!("Loop started.");
+        //     loop {
+        //         match rx.try_recv() {
+        //             Ok(event) => {
+        //                 info!(?event);
+        //                 if let DebouncedEvent::Create(path) = event {
+        //                     let mut inner = s.inner.write().unwrap();
+        //                     let filename = path.file_name().unwrap().to_str().unwrap().into();
+        //                     inner.new_files_seen.push(filename);
+        //                 }
+        //             }
+        //             Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        //             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+        //                 warn!("Disconnected");
+        //                 return;
+        //             }
+        //         }
+        //
+        //         tokio::task::yield_now().await;
+        //     }
+        // });
+        todo!();
 
         Ok(())
     }
@@ -545,23 +586,24 @@ impl Manager {
         let mut inner = self.inner.write().unwrap();
         inner.state.insert(game_id, State::Uploading);
 
-        let s = self.clone();
-        tokio::spawn(async move {
-            // TODO: Second unwrap is for an empty entry.
-            // We're assuming the key exists if we've gone into this state.
-            let bytes =
-                s.db.get(Self::upload_bytes_db_key(&game_id))
-                    .unwrap()
-                    .unwrap();
-
-            info!(?game_id, ?turn_id, "Uploading.");
-            let rx = s
-                .api()
-                .unwrap()
-                .upload_save_client(turn_id, bytes.to_vec())
-                .await
-                .unwrap();
-        });
+        todo!();
+        // let s = self.clone();
+        // tokio::spawn(async move {
+        //     // TODO: Second unwrap is for an empty entry.
+        //     // We're assuming the key exists if we've gone into this state.
+        //     let bytes =
+        //         s.db.get(Self::upload_bytes_db_key(&game_id))
+        //             .unwrap()
+        //             .unwrap();
+        //
+        //     info!(?game_id, ?turn_id, "Uploading.");
+        //     let rx = s
+        //         .api()
+        //         .unwrap()
+        //         .upload_save_client(turn_id, bytes.to_vec())
+        //         .await
+        //         .unwrap();
+        // });
 
         Ok(())
     }
