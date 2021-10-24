@@ -3,7 +3,7 @@ use crate::{TITLE, VERSION};
 use actions::Actions;
 use auth_key_screen::AuthKeyScreen;
 use civfun_gmr::api::{Game, GetGamesAndPlayers, Player, UserId};
-use civfun_gmr::manager::{AuthState, Config, GameInfo, Manager};
+use civfun_gmr::manager::{AuthState, Config, Event, GameInfo, Manager};
 use games_list::GamesList;
 use iced::container::{Style, StyleSheet};
 use iced::svg::Handle;
@@ -46,7 +46,7 @@ pub fn run(manager: Manager) -> anyhow::Result<()> {
 #[derive(PartialEq, Debug, Clone)]
 pub enum Screen {
     NothingYet,
-    Error(String),
+    Error { message: String, next: Box<Screen> },
     AuthKeyInput,
     Games,
 }
@@ -55,7 +55,7 @@ impl Screen {
     pub fn should_show_actions(&self) -> bool {
         match self {
             Screen::Games => true,
-            Screen::Error(_) => true,
+            Screen::Error { .. } => true,
             _ => false,
         }
     }
@@ -88,7 +88,6 @@ pub struct CivFunUi {
 #[derive(Debug, Clone)]
 pub enum Message {
     GetManagerEvents,
-    AuthResponse(Option<UserId>),
     SetScreen(Screen),
     RequestRefresh(()),
     HasRefreshed(()),
@@ -200,9 +199,18 @@ impl Application for CivFunUi {
         use Message::*;
         match message {
             GetManagerEvents => {
-                // while let Some(event) = self.manager.get_events() {
-                //     self.update()
-                // }
+                while let Some(event) = self.manager.process().unwrap() {
+                    match event {
+                        // Event::AuthenticationSuccess => {}
+                        Event::AuthenticationFailure => {
+                            self.screen = Screen::Error {
+                                message: "Authentication Key error".to_string(),
+                                next: Box::new(Screen::AuthKeyInput),
+                            };
+                        }
+                        x => todo!("{:?}", x),
+                    }
+                }
             }
 
             AuthKeyMessage(message) => return self.enter_auth_key.update(message, _clipboard),
@@ -223,14 +231,6 @@ impl Application for CivFunUi {
                 self.manager.authenticate(&auth_key);
             }
 
-            AuthResponse(Some(_)) => {
-                debug!("Authenticated");
-                self.screen = Screen::Games;
-            }
-            AuthResponse(None) => {
-                debug!("Bad authentication");
-                self.screen = Screen::Error("Bad authentication".into());
-            }
             SetScreen(screen) => {
                 self.screen = screen;
             }
@@ -296,7 +296,7 @@ impl Application for CivFunUi {
             Screen::NothingYet => Text::new("Something funny is going on!").into(),
             Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
             Screen::Games => games.view(manager.games().as_slice()),
-            Screen::Error(msg) => Text::new(format!("Error!\n\n{}", msg)).into(),
+            Screen::Error { message, next } => Text::new(format!("Error!\n\n{}", message)).into(),
         };
 
         if *settings_visible {
@@ -354,9 +354,4 @@ impl Application for CivFunUi {
     fn background_color(&self) -> Color {
         style::background_color().into()
     }
-}
-
-// TODO: Result<Manager> (not anyhow::Result because Message needs to be Clone)
-async fn prepare_manager() -> Manager {
-    Manager::new().unwrap() // TODO: unwrap
 }
