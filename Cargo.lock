@@ -253,6 +253,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "pretty-hex",
+ "serde",
  "tracing",
 ]
 

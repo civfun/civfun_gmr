@@ -55,14 +55,6 @@ impl AuthKeyScreen {
         .padding(10)
         .size(20);
 
-        // let button = Button::new(
-        //     &mut self.button_state,
-        //     Text::new("Save")
-        //         .height(Length::Fill)
-        //         .vertical_alignment(VerticalAlignment::Center),
-        // )
-        // .on_press(AuthKeyMessage::Save);
-
         let button = action_button(
             ButtonView::Text("Save"),
             AuthKeyMessage::Save,

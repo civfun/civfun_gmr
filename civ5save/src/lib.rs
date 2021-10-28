@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use byteorder::{LittleEndian, ReadBytesExt};
 use pretty_hex::pretty_hex;
+use serde::{Deserialize, Serialize};
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{Debug, Formatter};
 use std::io;
@@ -10,7 +11,7 @@ use tracing::{debug, instrument, trace};
 type Result<T> = anyhow::Result<T, anyhow::Error>;
 type Error = anyhow::Error;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PlayerType {
     AI = 1,
     Dead = 2,
@@ -33,7 +34,7 @@ impl TryFrom<u32> for PlayerType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Chunk {
     id: usize,
     offset: u64,
@@ -51,7 +52,7 @@ impl Debug for Chunk {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Header {
     pub save: u32,
     pub game: String,
@@ -66,7 +67,7 @@ pub struct Header {
     pub map_script: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Player {
     name: String,
     player_type: PlayerType,
@@ -252,7 +253,7 @@ impl<'a> Civ5SaveReader<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Civ5Save {
     pub header: Header,
     pub players: Vec<Player>,

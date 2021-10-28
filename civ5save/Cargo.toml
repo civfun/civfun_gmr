@@ -7,6 +7,7 @@ edition = "2018"
 anyhow = "1.0.44"
 byteorder = "1.4.3"
 tracing = "0.1.29"
+serde = { version = "1.0.130", features = ["derive"] } # TODO: feature
 
 # Debugging
 pretty-hex = "0.2.1"
@@ -14,4 +15,3 @@ pretty-hex = "0.2.1"
 [dev-dependencies]
 test-env-log = { version = "0.2.7", default-features = false, features = ["trace"] }
 tracing-subscriber = "0.2.25"
-

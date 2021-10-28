@@ -1,5 +1,8 @@
-use civfun_gmr::manager::Manager;
+use anyhow::Context;
+use civfun_gmr::manager::{data_dir_path, Manager};
 use clap::{AppSettings, Clap};
+use std::path::PathBuf;
+use tracing::debug;
 
 mod ui;
 
@@ -22,20 +25,22 @@ enum SubCommand {
 // Submit(SubmitOpts),
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() {
+    run().unwrap();
+}
+
+fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     // let opts: Opts = Opts::parse();
-    // let gmr = Client::new(&opts.auth_key);
-    // dbg!(gmr.get_games_and_players().await.unwrap());
-    let manager = Manager::new()?;
-    // let config = manager.get_or_create_config()?;
-    // dbg!(&config);
-    // let games = gmr.games().await?;
-    // gmr.download(games[0].game_id).await?;
-    // let path = gmr.check_for_new_save().await?;
 
-    ui::run(manager)?;
+    let db_path = data_dir_path(&PathBuf::from("db.sled")).context("Constructing db.sled path")?;
+    debug!(?db_path);
 
-    Ok(())
+    let db =
+        sled::open(&db_path).with_context(|| format!("Could not create db at {:?}", &db_path))?;
+    let mut manager = Manager::new(db);
+    manager.start()?;
+    ui::run(manager)
 }

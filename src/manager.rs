@@ -1,13 +1,18 @@
-use anyhow::anyhow;
+use crate::api::{
+    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, Player, TurnId, UploadMessage, UserId,
+};
 use anyhow::Context;
+use anyhow::{anyhow, Error};
 use civ5save::{Civ5Save, Civ5SaveReader};
 use directories::{BaseDirs, ProjectDirs};
+use iced::futures::TryFutureExt;
 use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sled::IVec;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
@@ -17,56 +22,22 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, instrument, trace, trace_span, warn};
 
-use crate::api::{
-    Api, DownloadMessage, Game, GameId, GetGamesAndPlayers, Player, TurnId, UploadMessage, UserId,
-};
-
 type Result<T> = anyhow::Result<T>;
 
 const CONFIG_KEY: &str = "config";
-const GAME_API_RESPONSE_KEY: &str = "data";
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum AuthState {
-    Nothing,
-    Fetching,
-    AuthResult(Option<UserId>),
-}
-
-impl Default for AuthState {
-    fn default() -> Self {
-        AuthState::Nothing
-    }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Config {
-    auth_key: Option<String>,
-    expected_user_id: Option<UserId>,
-
-    #[serde(default)]
-    auth_state: AuthState,
-}
-
-#[derive(Debug, Clone)]
-pub struct GameInfo {
-    pub game: Game,
-    pub download: Option<State>,
-    pub parsed: Option<Civ5Save>,
-}
+const GAMES_KEY: &str = "games";
+const AUTH_KEY: &str = "auth-key";
+const USER_ID_KEY: &str = "user-id";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredPlayer {
+pub struct StoredPlayer {
     player: Player,
     image_data: Vec<u8>,
     last_downloaded: SystemTime,
 }
 
-#[derive(Debug, Default)]
-struct Inner {}
-
 #[derive(Debug, Clone)]
-pub enum State {
+pub enum TransferState {
     Idle,
     Downloading,
     Downloaded,
@@ -79,51 +50,68 @@ pub enum State {
 pub enum Event {
     AuthenticationSuccess,
     AuthenticationFailure,
-    UpdatedGames(Vec<GameInfo>),
-    // UpdatedPlayers(Vec<StoredPlayer>),
+    UpdatedGames(Vec<Game>),
+    UpdatedPlayer(StoredPlayer),
+}
+
+#[derive(Debug)]
+enum FetchGames {
+    Games(Vec<Game>),
+    StoredPlayer(StoredPlayer),
 }
 
 #[derive(Debug)]
 pub struct Manager {
     db: sled::Db,
 
-    config: Config,
-    games: GetGamesAndPlayers,
-    state: HashMap<GameId, State>,
+    transfer: HashMap<GameId, TransferState>,
     new_files_seen: Vec<String>,
-    parsed_saves: HashMap<GameId, Civ5Save>,
+    events: Vec<Event>,
 
     auth_rx: Option<oneshot::Receiver<Option<UserId>>>,
+    fetch_games_rx: Option<mpsc::Receiver<Result<FetchGames>>>,
     download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     upload_rx: HashMap<GameId, Receiver<UploadMessage>>,
 }
 
 impl Manager {
-    pub fn new() -> Result<Self> {
-        let db_path =
-            data_dir_path(&PathBuf::from("db.sled")).context("Constructing db.sled path")?;
-        debug!("DB path: {:?}", &db_path);
-        let db = sled::open(&db_path)
-            .with_context(|| format!("Could not create db at {:?}", &db_path))?;
-
-        let mut s = Self {
+    pub fn new(db: sled::Db) -> Self {
+        Self {
             db,
-            config: Default::default(),
-            games: Default::default(),
-            state: Default::default(),
+            transfer: Default::default(),
             new_files_seen: vec![],
-            parsed_saves: Default::default(),
+            events: vec![],
             auth_rx: None,
+            fetch_games_rx: None,
             download_rx: Default::default(),
             upload_rx: Default::default(),
-        };
-        s.load_config().context("Loading config.")?;
-        s.load_games().context("Loading existing games.")?;
-
-        Ok(s)
+        }
     }
 
-    pub fn process(&mut self) -> Result<Option<Event>> {
+    // TODO: Turn this into a builder pattern so `start()` is a `build()` in a `ManagerBuilder`.
+    #[instrument(skip(self))]
+    pub fn start(&mut self) -> Result<()> {
+        trace!("Setting up manager.");
+        self.fill_transfer_states().context("Transfer states.")?;
+
+        if let Some(auth_key) = self.auth_key()? {
+            debug!("☑ Has auth key.");
+            self.authenticate(&auth_key)?;
+        }
+
+        if self.user_id()?.is_some() {
+            debug!("☑ Has user_id.");
+
+            trace!("Fetching games on startup.");
+            self.fetch_games().context("Fetching games on startup.")?;
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub fn process(&mut self) -> Result<Vec<Event>> {
+        let mut events = vec![];
         if let Some(ref mut rx) = self.auth_rx {
             match rx.try_recv() {
                 Ok(maybe_user_id) => {
@@ -131,51 +119,76 @@ impl Manager {
                         .handle_auth_response(maybe_user_id)
                         .with_context(|| format!("Handling auth response: {:?}", &maybe_user_id))?
                     {
-                        return Ok(Some(event));
+                        events.push(event);
                     }
                 }
-                Err(oneshot::error::TryRecvError::Empty) => {}
-                Err(oneshot::error::TryRecvError::Closed) => {}
+                Err(_) => {}
             };
         }
 
-        Ok(None)
+        let mut fetched = vec![];
+        if let Some(ref mut rx) = self.fetch_games_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        trace!(?event);
+                        fetched.push(event);
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+        }
+
+        for fetch in fetched {
+            match fetch.context("Fetch games.")? {
+                FetchGames::Games(games) => {
+                    self.save_games(&games)?;
+                    events.push(Event::UpdatedGames(games));
+                }
+                FetchGames::StoredPlayer(stored_player) => {
+                    self.save_stored_player(&stored_player)?;
+                    events.push(Event::UpdatedPlayer(stored_player));
+                }
+            };
+        }
+
+        if events.len() > 0 {
+            trace!(?events);
+        }
+
+        Ok(events)
     }
 
-    pub fn games(&self) -> Vec<GameInfo> {
-        self.games
-            .games
-            .iter()
-            .map(|game| GameInfo {
-                game: game.clone(),
-                download: self.state.get(&game.game_id).cloned(),
-                parsed: self.parsed_saves.get(&game.game_id).cloned(),
-            })
-            .collect()
+    #[instrument(skip(self))]
+    pub fn games(&self) -> Result<Vec<Game>> {
+        Ok(match self.db.get(GAMES_KEY)? {
+            Some(b) => serde_json::from_slice(&b)?,
+            None => vec![],
+        })
     }
 
-    fn my_games(&self) -> Result<Vec<GameInfo>> {
-        let user_id = match &self.config.auth_state {
-            AuthState::AuthResult(Some(user_id)) => user_id,
-            _ => return Err(anyhow!("my_games requested without a valid auth state.")),
-        };
+    #[instrument(skip(self))]
+    fn my_games(&self) -> Result<Vec<Game>> {
+        let user_id = self
+            .user_id()?
+            .ok_or(anyhow!("my_games requested without a valid auth state."))?;
 
         Ok(self
-            .games()
+            .games()?
             .into_iter()
-            .filter(|g| g.game.is_user_id_turn(user_id))
+            .filter(|g| g.is_user_id_turn(&user_id))
             .collect())
     }
 
     #[instrument(skip(self, key))]
-    pub fn authenticate(&mut self, key: &str) {
+    pub fn authenticate(&mut self, key: &str) -> Result<()> {
         trace!("Authentication requested.");
         let (tx, rx) = oneshot::channel();
         self.auth_rx = Some(rx);
-        self.config.auth_key = Some(key.to_string());
-        // This shouldn't panic because we just gave the API key.
-        // TODO: Maybe be more explicit when getting an api instance, instead of calling self.api()?
-        let api = self.api().unwrap();
+        self.save_auth_key(key)?;
+        let api = self.api()?;
 
         tokio::spawn(async move {
             trace!("Sending authentication request.");
@@ -183,82 +196,93 @@ impl Manager {
             debug!(?maybe_user_id, "User ID response.");
             tx.send(maybe_user_id).unwrap();
         });
+
+        Ok(())
     }
 
     #[instrument(skip(self))]
     fn handle_auth_response(&mut self, maybe_user_id: Option<UserId>) -> Result<Option<Event>> {
         trace!("Handling auth response.");
 
-        self.config.auth_state = AuthState::AuthResult(maybe_user_id);
-
-        // The user_id has changed so we reset the games.
+        let previous_user_id = self.user_id()?;
         if let Some(user_id) = maybe_user_id {
-            if let Some(expected_user_id) = self.config.expected_user_id {
-                if expected_user_id != user_id {
+            self.save_user_id(&user_id)?;
+            let mut should_clear = false;
+
+            if let Some(previous_user_id) = previous_user_id {
+                if previous_user_id != user_id {
                     info!("Clearing games because user_id is different");
-                    self.clear_games().context("Clear games 1.")?
-                } else {
-                    debug!("Same user as last login.")
+                    self.clear_games().context("Clear games.")?;
                 }
-            } else {
-                info!("Clearing games because of no previous user_id.");
-                self.clear_games().context("Clear games 2.")?
             }
-            self.config.expected_user_id = Some(user_id);
-            self.save_config()?;
+
             Ok(Some(Event::AuthenticationSuccess))
         } else {
-            self.save_config()?;
             warn!("Failed to authenticate.");
             Ok(Some(Event::AuthenticationFailure))
         }
     }
 
-    /// Ready means we have an auth key and a user id.
-    pub fn all_ready(&self) -> bool {
-        self.auth_ready() && self.user_ready()
-    }
-
-    pub fn auth_ready(&self) -> bool {
-        self.config.auth_key.is_some()
-    }
-
-    pub fn user_ready(&self) -> bool {
-        match self.config.auth_state {
-            AuthState::AuthResult(Some(_)) => true,
-            _ => false,
-        }
-    }
-
     /// This will eventually fetch a second time if the players shown don't exist in the db.
-    /// It will also start downloading games if they don't exist.
     #[instrument(skip(self))]
-    pub async fn refresh(&mut self) -> Result<()> {
-        let games = self.api()?.get_games_and_players(&[]).await?;
-        self.save_games(&games)?;
-        let unknown_players = self
-            .filter_unknown_players(&games)
-            .context("Filter unknown players.")?;
-        if unknown_players.len() > 0 {
-            let data = self
-                .api()?
-                .get_games_and_players(unknown_players.as_slice())
-                .await?;
-
-            for player in data.players {
-                debug!(avatar_url = ?player.avatar_url, "Fetching avatar.");
-                let db = self.db.clone();
-                let player = player.clone();
-                tokio::spawn(async move {
-                    Self::fetch_avatar(player, db).await;
-                });
+    pub fn fetch_games(&mut self) -> Result<()> {
+        trace!("Fetching games.");
+        let (mut tx, rx) = mpsc::channel(5);
+        self.fetch_games_rx = Some(rx);
+        let api = self.api()?;
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            if let Err(err) = Self::do_fetch_games(db, api, &mut tx).await {
+                tx.send(Err(err)).await.unwrap();
             }
-        }
+        });
         Ok(())
     }
 
+    async fn do_fetch_games(
+        db: sled::Db,
+        api: Api,
+        tx: &mut mpsc::Sender<Result<FetchGames>>,
+    ) -> Result<()> {
+        let games = api.get_games_and_players(&[]).await?;
+        tx.send(Ok(FetchGames::Games(games.games.clone())))
+            .await
+            .unwrap();
+
+        let unknown_players =
+            Self::filter_unknown_players(&db, &games).context("Filter unknown players.")?;
+        if unknown_players.len() == 0 {
+            return Ok(());
+        }
+
+        let data = api
+            .get_games_and_players(unknown_players.as_slice())
+            .await?;
+
+        for player in data.players {
+            debug!(avatar_url = ?player.avatar_url, "Fetching avatar.");
+            let db_ = db.clone();
+            let tx_ = tx.clone();
+            let player = player.clone();
+            tokio::spawn(async move {
+                let result = Self::fetch_avatar(player, db_).await;
+                tx_.send(result.map(|sp| FetchGames::StoredPlayer(sp)))
+                    .await
+                    .unwrap();
+            });
+        }
+
+        Ok(())
+    }
+
+    // fn handle_fetch_games() {
+    //     self.save_games(&games)?;
+    //
+    //     Ok(())
+    // }
+
     #[instrument(skip(db))]
-    async fn fetch_avatar(player: Player, db: sled::Db) {
+    async fn fetch_avatar(player: Player, db: sled::Db) -> Result<StoredPlayer> {
         let image_data = reqwest::get(&player.avatar_url)
             .await
             .unwrap()
@@ -266,7 +290,6 @@ impl Manager {
             .await
             .unwrap()
             .to_vec();
-        let key = Self::player_info_key(&player.steam_id);
 
         let stored_player = StoredPlayer {
             player,
@@ -274,11 +297,10 @@ impl Manager {
             last_downloaded: SystemTime::now(),
         };
 
-        let json = serde_json::to_vec(&stored_player).unwrap();
-        db.insert(key, json).unwrap();
+        Ok(stored_player)
     }
 
-    fn filter_unknown_players(&self, games: &GetGamesAndPlayers) -> Result<Vec<UserId>> {
+    fn filter_unknown_players(db: &sled::Db, games: &GetGamesAndPlayers) -> Result<Vec<UserId>> {
         let mut players: Vec<UserId> = games
             .games
             .iter()
@@ -291,8 +313,7 @@ impl Manager {
         let mut needs_request = vec![];
         for user_id in players {
             let key = Self::player_info_key(&user_id);
-            let data = self
-                .db
+            let data = db
                 .get(&key)
                 .with_context(|| format!("Player info key: {}", &key))?;
 
@@ -308,20 +329,24 @@ impl Manager {
         Ok(needs_request)
     }
 
-    pub fn user_id(&self) -> Option<UserId> {
-        if let AuthState::AuthResult(maybe_id) = self.config.auth_state {
-            maybe_id
-        } else {
-            None
-        }
-    }
-
+    // pub fn user_id(&self) -> Option<UserId> {
+    //     if let AuthState::AuthResult(maybe_id) = self.config.auth_state {
+    //         maybe_id
+    //     } else {
+    //         None
+    //     }
+    // }
+    //
     fn player_info_key(user_id: &UserId) -> String {
         format!("player-info-{}", user_id)
     }
 
     fn saved_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
         format!("saved-bytes-{}-{}", game_id, turn_id)
+    }
+
+    fn analysed_game_key(game_id: &GameId, turn_id: &TurnId) -> String {
+        format!("analysed-{}-{}", game_id, turn_id)
     }
 
     fn upload_bytes_db_key(game_id: &GameId) -> String {
@@ -377,22 +402,37 @@ impl Manager {
             Self::saved_bytes_db_key(&game_id, &turn_id),
             data.as_slice(),
         )?;
-        self.state.insert(game_id.clone(), State::Downloaded);
+        self.transfer
+            .insert(game_id.clone(), TransferState::Downloaded);
 
-        self.analyse_download(game_id, &data)?;
+        self.analyse(game_id, turn_id, &data)?;
 
         Ok(())
     }
 
-    fn analyse_download(&mut self, game_id: &GameId, data: &[u8]) -> Result<()> {
+    #[instrument(skip(self, data))]
+    fn analyse(&mut self, game_id: &GameId, turn_id: &TurnId, data: &[u8]) -> Result<()> {
         trace!(data_len = ?data.len(), "Analysing save.");
         let civ5save = Civ5SaveReader::new(&data).parse()?;
         trace!(?civ5save);
-        self.parsed_saves.insert(game_id.clone(), civ5save);
+
+        let key = Self::analysed_game_key(game_id, turn_id);
+        let encoded = serde_json::to_vec(&civ5save)?;
+        self.db.insert(key, encoded)?;
         Ok(())
     }
 
-    pub fn download_status(&self) -> Vec<State> {
+    #[instrument(skip(self))]
+    fn analysed(&self, game_id: &GameId, turn_id: &TurnId) -> Result<Option<Civ5Save>> {
+        let key = Self::analysed_game_key(game_id, turn_id);
+        let bytes = self.db.get(key).context("Fetching analysed")?;
+        match bytes {
+            None => Ok(None),
+            Some(b) => Ok(Some(serde_json::from_slice(&b)?)),
+        }
+    }
+
+    pub fn download_status(&self) -> Vec<TransferState> {
         todo!()
     }
 
@@ -474,39 +514,34 @@ impl Manager {
         drop(fp);
         let new_parsed_save = Civ5SaveReader::new(&bytes).parse()?;
 
-        let info = self.find_game_for_save(&new_parsed_save)?.unwrap();
-        let game_id = info.game.game_id;
+        let game = self.find_game_for_save(&new_parsed_save)?.unwrap();
+        let game_id = game.game_id;
         self.db
             .insert(Self::upload_bytes_db_key(&game_id), bytes)
             .unwrap();
-        self.state.insert(game_id, State::UploadQueued);
+        self.transfer.insert(game_id, TransferState::UploadQueued);
 
         Ok(true)
     }
 
     #[instrument(skip(self))]
     pub async fn process_transfers(&mut self) -> Result<()> {
-        if !self.user_ready() {
-            return Ok(());
-        }
-        let my_games = self.my_games()?.clone();
-
-        for info in my_games {
-            let game_id = info.game.game_id;
+        for game in self.my_games()? {
+            let game_id = game.game_id;
             let state = {
-                match self.state.get(&info.game.game_id) {
+                match self.transfer.get(&game.game_id) {
                     Some(s) => s.clone(),
-                    None => State::Idle,
+                    None => TransferState::Idle,
                 }
             };
 
             trace!(?game_id, ?state);
 
             match state {
-                State::Idle => self.process_idle_state(info).await?,
-                State::Downloading => self.process_downloading_state(info).await?,
-                State::Downloaded => {}
-                State::UploadQueued => self.process_upload_queued(info).await?,
+                TransferState::Idle => self.process_idle_state(game).await?,
+                TransferState::Downloading => self.process_downloading_state(game).await?,
+                TransferState::Downloaded => {}
+                TransferState::UploadQueued => self.process_upload_queued(game).await?,
                 // State::Uploading => self.handle_uploading(game).await?,
                 // State::UploadComplete => self.handle_upload_complete(game).await?,
                 _ => todo!("{:?}", state),
@@ -515,29 +550,30 @@ impl Manager {
         Ok(())
     }
 
-    #[instrument(skip(self, info))]
-    async fn process_idle_state(&mut self, info: GameInfo) -> Result<()> {
-        if info.game.current_turn.is_first_turn {
+    #[instrument(skip(self, game))]
+    async fn process_idle_state(&mut self, game: Game) -> Result<()> {
+        if game.current_turn.is_first_turn {
             // No save for first turn.
             return Ok(());
         }
 
-        let path = Self::save_dir()?.join(Self::filename(&info.game)?);
+        let path = Self::save_dir()?.join(Self::filename(&game)?);
         trace!(?path, "Downloading.");
         let (rx, handle) = self
             .api()?
-            .get_latest_save_file_bytes(&info.game.game_id, &path)
+            .get_latest_save_file_bytes(&game.game_id, &path)
             .await?;
 
-        self.state.insert(info.game.game_id, State::Downloading);
-        self.download_rx.insert(info.game.game_id, rx);
+        self.transfer
+            .insert(game.game_id, TransferState::Downloading);
+        self.download_rx.insert(game.game_id, rx);
         Ok(())
     }
 
-    #[instrument(skip(self, info))]
-    async fn process_downloading_state(&mut self, info: GameInfo) -> Result<()> {
-        let game_id = &info.game.game_id;
-        let turn_id = &info.game.current_turn.turn_id;
+    #[instrument(skip(self, game))]
+    async fn process_downloading_state(&mut self, game: Game) -> Result<()> {
+        let game_id = &game.game_id;
+        let turn_id = &game.current_turn.turn_id;
 
         let rx = self.download_rx.get_mut(game_id).unwrap();
         let mut completed_download = None;
@@ -577,13 +613,13 @@ impl Manager {
         Ok(())
     }
 
-    #[instrument(skip(self, info))]
-    async fn process_upload_queued(&mut self, info: GameInfo) -> Result<()> {
-        let game_id = info.game.game_id;
-        let turn_id = info.game.current_turn.turn_id;
+    #[instrument(skip(self, game))]
+    async fn process_upload_queued(&mut self, game: Game) -> Result<()> {
+        let game_id = game.game_id;
+        let turn_id = game.current_turn.turn_id;
         info!(?game_id);
 
-        self.state.insert(game_id, State::Uploading);
+        self.transfer.insert(game_id, TransferState::Uploading);
 
         todo!();
         // let s = self.clone();
@@ -607,13 +643,10 @@ impl Manager {
         Ok(())
     }
 
-    fn find_game_for_save(&self, new_parsed_save: &Civ5Save) -> Result<Option<GameInfo>> {
-        let mut smallest_diff = None;
-        for info in self.my_games()? {
-            let game_id = info.game.game_id;
+    fn find_game_for_save(&self, new_parsed_save: &Civ5Save) -> Result<Option<Game>> {
+        let mut smallest_diff: Option<(u32, Game)> = None;
+        for game in self.my_games()? {
             let new_turn = new_parsed_save.header.turn;
-            let span = trace_span!("diff", ?game_id, ?new_turn);
-            let _enter = span.enter();
 
             // XXX: The turn in the filename doesn't match the API's turn.
             // let other_turn = info.game.current_turn.number;
@@ -623,10 +656,11 @@ impl Manager {
             // }
             // trace!(other_turn, turn, "Turn matches!");
 
-            let last_parsed_save = match &info.parsed {
-                Some(other_parsed) => other_parsed,
+            let last_parsed = self.analysed(&game.game_id, &game.current_turn.turn_id)?;
+            let last_parsed_save = match last_parsed {
+                Some(parsed) => parsed,
                 None => {
-                    warn!("Save not parsed. Can not check.");
+                    warn!(?game, "Skipping save because of no analysis.");
                     continue;
                 }
             };
@@ -644,20 +678,20 @@ impl Manager {
             let diff = new_parsed_save.difference_score(&last_parsed_save)?;
             trace!(diff);
             smallest_diff = match smallest_diff {
-                Some((sd, sd_info)) => {
+                Some((sd, game)) => {
                     if diff < sd {
-                        Some((diff, info.clone()))
+                        Some((diff, game.clone()))
                     } else {
-                        Some((sd, sd_info))
+                        Some((sd, game))
                     }
                 }
-                None => Some((diff, info.clone())),
+                None => Some((diff, game.clone())),
             };
         }
         match smallest_diff {
-            Some((_, sd_info)) => {
-                info!(game_id = ?sd_info, "Smallest diff found.");
-                Ok(Some(sd_info))
+            Some((_, game)) => {
+                info!(game_id = ?game.game_id, "Smallest diff found.");
+                Ok(Some(game))
             }
             None => {
                 warn!("No games found to compare.");
@@ -680,42 +714,43 @@ impl Manager {
         Ok(Some(turn))
     }
 
-    pub fn load_config(&mut self) -> Result<()> {
-        let config = match self.db.get(CONFIG_KEY).context("Loading CONFIG_KEY.")? {
-            Some(b) => serde_json::from_slice(&b).with_context(|| {
-                let s = String::from_utf8(b.to_vec()).unwrap();
-                format!("Parsing JSON: {}", s)
-            })?,
-            None => Config::default(),
-        };
-        self.config = config;
+    /// This is private. Use `authenticate()` to set a key instead. It has extra logic for deleting
+    /// existing state if the user has changed.
+    fn save_auth_key(&self, key: &str) -> Result<()> {
+        self.db.insert(AUTH_KEY, key)?;
         Ok(())
     }
 
-    // RwLockWriteGuard is used here so that a config field can be modified within the same
-    // write lock as the caller.
-    fn save_config(&self) -> Result<()> {
-        let encoded = serde_json::to_vec(&self.config)?;
-        self.db.insert(CONFIG_KEY, encoded.as_slice())?;
+    pub fn auth_key(&self) -> Result<Option<String>> {
+        self.db
+            .get(AUTH_KEY)?
+            .map(|iv| String::from_utf8(iv.to_vec()).with_context(|| format!("Parsing {:?}", iv)))
+            .transpose()
+    }
+
+    pub fn save_user_id(&self, user_id: &UserId) -> Result<()> {
+        self.db
+            .insert(USER_ID_KEY, format!("{}", user_id).as_str())?;
         Ok(())
     }
 
-    pub fn save_auth_key(&mut self, key: &str) -> Result<()> {
-        self.config.auth_key = Some(key.to_owned());
-        self.save_config()?;
-        Ok(())
+    pub fn user_id(&self) -> Result<Option<UserId>> {
+        self.db
+            .get(USER_ID_KEY)?
+            .map(Self::decode_user_id)
+            .transpose()
+    }
+
+    fn decode_user_id(iv: IVec) -> Result<UserId> {
+        let context = || format!("Parsing {:?}", &iv);
+        let s = String::from_utf8(iv.to_vec()).with_context(context)?;
+        let n = s.parse::<u64>().with_context(context)?;
+        Ok(n.into())
     }
 
     #[instrument(skip(self))]
-    pub fn load_games(&mut self) -> Result<()> {
-        let data = match self.db.get(GAME_API_RESPONSE_KEY)? {
-            Some(b) => serde_json::from_slice(&b)?,
-            None => GetGamesAndPlayers::default(),
-        };
-        trace!(?data, "Existing games in db.");
-        self.games = data;
-
-        for game in self.games.games.clone().into_iter().map(|g| g.clone()) {
+    pub fn fill_transfer_states(&mut self) -> Result<()> {
+        for game in self.games()? {
             let game_id = game.game_id;
             let turn_id = game.current_turn.turn_id;
 
@@ -724,43 +759,44 @@ impl Manager {
                 .contains_key(Self::saved_bytes_db_key(&game_id, &turn_id))?
             {
                 trace!(?game_id, "Marking game as already downloaded.");
-                self.state.insert(game_id, State::Downloaded);
-                let data = self
-                    .db
-                    .get(Self::saved_bytes_db_key(&game_id, &turn_id))
-                    .unwrap()
-                    .unwrap();
-                self.analyse_download(&game_id, &data)?;
+                self.transfer.insert(game_id, TransferState::Downloaded);
             }
         }
 
         Ok(())
     }
 
-    pub fn save_games(&mut self, data: &GetGamesAndPlayers) -> Result<()> {
-        let encoded = serde_json::to_vec(&data)?;
-        self.db.insert(GAME_API_RESPONSE_KEY, encoded.as_slice())?;
-        self.games = data.clone();
+    pub fn save_games(&self, games: &[Game]) -> Result<()> {
+        let encoded = serde_json::to_vec(games)?;
+        self.db.insert(GAMES_KEY, encoded.as_slice())?;
         Ok(())
     }
 
     pub fn clear_games(&self) -> Result<()> {
-        self.db.remove(GAME_API_RESPONSE_KEY)?;
+        self.db.remove(GAMES_KEY)?;
+        Ok(())
+    }
+
+    fn save_stored_player(&self, stored_player: &StoredPlayer) -> Result<()> {
+        let key = Self::player_info_key(&stored_player.player.steam_id);
+        let json = serde_json::to_vec(&stored_player).context("Encoding player info.")?;
+        trace!(?key, ?json, "Saving player info.");
+        self.db.insert(key, json).context("Saving player info.")?;
         Ok(())
     }
 
     fn api(&self) -> Result<Api> {
-        match &self.config.auth_key {
+        match &self.auth_key()? {
             Some(auth_key) => Ok(Api::new(auth_key)),
             None => Err(anyhow!("Attempt to access API without auth key.")),
         }
     }
 }
 
-fn project_dirs() -> anyhow::Result<ProjectDirs> {
+pub fn project_dirs() -> anyhow::Result<ProjectDirs> {
     Ok(ProjectDirs::from("", "civ.fun", "gmr").context("Could not determine ProjectDirs.")?)
 }
 
-pub(crate) fn data_dir_path(join: &Path) -> anyhow::Result<PathBuf> {
+pub fn data_dir_path(join: &Path) -> anyhow::Result<PathBuf> {
     Ok(project_dirs()?.data_dir().join(join))
 }
