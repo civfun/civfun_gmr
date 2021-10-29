@@ -109,6 +109,7 @@ impl Application for CivFunUi {
     fn new(manager: Manager) -> (CivFunUi, Command<Self::Message>) {
         let mut civfun = CivFunUi {
             manager,
+            games: vec![],
             screen: Default::default(),
             status_text: "".to_string(),
             error: Default::default(),
@@ -162,7 +163,6 @@ impl Application for CivFunUi {
                         }
                         Event::UpdatedGames(games) => {
                             self.games = games;
-                            todo!();
                         }
                         x => todo!("{:?}", x),
                     }
@@ -210,7 +210,7 @@ impl Application for CivFunUi {
             prefs: settings,
             scroll_state,
             enter_auth_key,
-            games_list: games,
+            games_list,
             ref mut settings_button_state,
             ..
         } = self;
@@ -218,7 +218,7 @@ impl Application for CivFunUi {
         let mut content = match screen {
             Screen::NothingYet => normal_text("Loading...").into(),
             Screen::AuthKeyInput => enter_auth_key.view().map(Message::AuthKeyMessage),
-            Screen::Games => games.view(manager.games().unwrap().as_slice()),
+            Screen::Games => games_list.view(&self.games),
             Screen::Settings => settings.view(),
             Screen::Error {
                 message: text,

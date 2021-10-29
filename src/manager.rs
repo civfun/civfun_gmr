@@ -154,6 +154,8 @@ impl Manager {
             };
         }
 
+        self.process_transfers()?;
+
         if events.len() > 0 {
             trace!(?events);
         }
