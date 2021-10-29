@@ -25,8 +25,7 @@ enum SubCommand {
 // Submit(SubmitOpts),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     run().unwrap();
 }
 

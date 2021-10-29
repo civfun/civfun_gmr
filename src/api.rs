@@ -243,7 +243,7 @@ impl Api {
     }
 
     #[instrument(skip(self))]
-    pub async fn get_latest_save_file_bytes(
+    pub fn get_latest_save_file_bytes(
         &self,
         game_id: &GameId,
         save_path: &PathBuf,

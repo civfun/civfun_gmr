@@ -36,10 +36,10 @@ pub struct StoredPlayer {
     last_downloaded: SystemTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TransferState {
     Idle,
-    Downloading,
+    Downloading(Receiver<DownloadMessage>),
     Downloaded,
     UploadQueued,
     Uploading,
@@ -63,15 +63,11 @@ enum FetchGames {
 #[derive(Debug)]
 pub struct Manager {
     db: sled::Db,
-
     transfer: HashMap<GameId, TransferState>,
-    new_files_seen: Vec<String>,
-    events: Vec<Event>,
-
     auth_rx: Option<oneshot::Receiver<Option<UserId>>>,
     fetch_games_rx: Option<mpsc::Receiver<Result<FetchGames>>>,
-    download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     upload_rx: HashMap<GameId, Receiver<UploadMessage>>,
+    watch_files_rx: Option<Receiver<String>>,
 }
 
 impl Manager {
@@ -79,12 +75,11 @@ impl Manager {
         Self {
             db,
             transfer: Default::default(),
-            new_files_seen: vec![],
-            events: vec![],
             auth_rx: None,
             fetch_games_rx: None,
-            download_rx: Default::default(),
+            // download_rx: Default::default(),
             upload_rx: Default::default(),
+            watch_files_rx: None,
         }
     }
 
@@ -105,6 +100,8 @@ impl Manager {
             trace!("Fetching games on startup.");
             self.fetch_games().context("Fetching games on startup.")?;
         }
+
+        self.start_watching_saves()?;
 
         Ok(())
     }
@@ -155,6 +152,7 @@ impl Manager {
         }
 
         self.process_transfers()?;
+        self.process_new_saves()?;
 
         if events.len() > 0 {
             trace!(?events);
@@ -439,52 +437,62 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub async fn start_watching_saves(&self) -> Result<()> {
+    pub fn start_watching_saves(&mut self) -> Result<()> {
         let save_dir = Self::save_dir().unwrap();
         debug!(?save_dir);
 
-        // let (tx, rx) = std::sync::mpsc::channel();
-        // let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
-        // watcher.watch(save_dir, RecursiveMode::NonRecursive)?;
-        //
-        // // let s = self.clone();
-        // tokio::spawn(async move {
-        //     // Move watcher into here, since it would be dropped otherwise and then the channel
-        //     // would be dropped.
-        //     let _ = watcher;
-        //
-        //     trace!("Loop started.");
-        //     loop {
-        //         match rx.try_recv() {
-        //             Ok(event) => {
-        //                 info!(?event);
-        //                 if let DebouncedEvent::Create(path) = event {
-        //
-        //                     let filename = path.file_name().unwrap().to_str().unwrap().into();
-        //                     self.new_files_seen.push(filename);
-        //                 }
-        //             }
-        //             Err(std::sync::mpsc::TryRecvError::Empty) => {}
-        //             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-        //                 warn!("Disconnected");
-        //                 return;
-        //             }
-        //         }
-        //
-        //         tokio::task::yield_now().await;
-        //     }
-        // });
-        todo!();
+        let (tx, rx) = mpsc::channel(10);
+        self.watch_files_rx = Some(rx);
+
+        let (watch_tx, watch_rx) = std::sync::mpsc::channel();
+        let mut watcher: RecommendedWatcher = Watcher::new(watch_tx, Duration::from_millis(250))?;
+        watcher.watch(save_dir, RecursiveMode::NonRecursive)?;
+
+        tokio::spawn(async move {
+            // Move watcher into here, since it would be dropped otherwise and then the channel
+            // would be dropped.
+            let _ = watcher;
+
+            trace!("Loop started.");
+            loop {
+                let event = watch_rx.try_recv();
+                match event {
+                    Ok(event) => {
+                        info!(?event);
+                        if let DebouncedEvent::Create(path) = event {
+                            let filename = path.file_name().unwrap().to_str().unwrap().into();
+                            tx.send(filename).await.unwrap();
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        warn!("Disconnected");
+                        return;
+                    }
+                }
+
+                tokio::task::yield_now().await;
+            }
+        });
 
         Ok(())
     }
 
     pub fn process_new_saves(&mut self) -> Result<()> {
-        let new_files = self.new_files_seen.clone();
-        self.new_files_seen = vec![];
+        let rx = match self.watch_files_rx {
+            Some(ref mut rx) => rx,
+            None => {
+                warn!("Receiver is None for watch_files_rx.");
+                return Ok(());
+            }
+        };
 
-        for file in new_files {
-            self.handle_save(&file).context(file).unwrap(); // TODO: unwrap
+        let mut found = vec![];
+        while let Ok(file) = rx.try_recv() {
+            found.push(file);
+        }
+        for file in found {
+            self.handle_save(&file).context(file)?;
         }
 
         Ok(())
@@ -527,24 +535,23 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub async fn process_transfers(&mut self) -> Result<()> {
+    pub fn process_transfers(&mut self) -> Result<()> {
         for game in self.my_games()? {
             let game_id = game.game_id;
-            let state = {
-                match self.transfer.get(&game.game_id) {
-                    Some(s) => s.clone(),
-                    None => TransferState::Idle,
-                }
-            };
+
+            let state = self
+                .transfer
+                .entry(game.game_id.clone())
+                .or_insert(TransferState::Idle);
 
             trace!(?game_id, ?state);
 
             match state {
-                TransferState::Idle => self.process_idle_state(game).await?,
-                TransferState::Downloading => self.process_downloading_state(game).await?,
+                TransferState::Idle => self.process_idle_state(game)?,
+                // TransferState::Downloading() => self.process_downloading_state(game)?,
                 TransferState::Downloaded => {}
-                TransferState::UploadQueued => self.process_upload_queued(game).await?,
-                // State::Uploading => self.handle_uploading(game).await?,
+                // TransferState::UploadQueued => self.process_upload_queued(game)?,
+                // State::Uploading => self.handle_uploading(game)?,
                 // State::UploadComplete => self.handle_upload_complete(game).await?,
                 _ => todo!("{:?}", state),
             }
@@ -553,9 +560,12 @@ impl Manager {
     }
 
     #[instrument(skip(self, game))]
-    async fn process_idle_state(&mut self, game: Game) -> Result<()> {
+    fn process_idle_state(&mut self, game: Game) -> Result<()> {
         if game.current_turn.is_first_turn {
             // No save for first turn.
+            trace!("First turn. Marking as downloaded.");
+            self.transfer
+                .insert(game.game_id, TransferState::Downloaded);
             return Ok(());
         }
 
@@ -563,57 +573,55 @@ impl Manager {
         trace!(?path, "Downloading.");
         let (rx, handle) = self
             .api()?
-            .get_latest_save_file_bytes(&game.game_id, &path)
-            .await?;
+            .get_latest_save_file_bytes(&game.game_id, &path)?;
 
         self.transfer
-            .insert(game.game_id, TransferState::Downloading);
-        self.download_rx.insert(game.game_id, rx);
+            .insert(game.game_id, TransferState::Downloading(rx));
         Ok(())
     }
 
-    #[instrument(skip(self, game))]
-    async fn process_downloading_state(&mut self, game: Game) -> Result<()> {
-        let game_id = &game.game_id;
-        let turn_id = &game.current_turn.turn_id;
-
-        let rx = self.download_rx.get_mut(game_id).unwrap();
-        let mut completed_download = None;
-        loop {
-            let msg = match rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => break,
-                Err(err) => panic!("{:?}", err),
-            };
-            match msg {
-                DownloadMessage::Error(e) => {
-                    error!(?e, "Download");
-                }
-                DownloadMessage::Started(size) => {
-                    trace!(?size, "Started");
-                }
-                DownloadMessage::Chunk(percentage) => {
-                    trace!(?percentage, "Download progress");
-                }
-                DownloadMessage::Done(path) => {
-                    trace!("Done!");
-                    // Use update_state variable because we need to modify
-                    // `self.download_state` which is currently borrowed.
-                    completed_download = Some(path);
-                    break;
-                }
-            }
-        }
-        if let Some(path) = completed_download {
-            // Save the file into the DB because:
-            // 1) The user might delete the file in the future
-            // 2) Be able to analyse the file and compare when the user uploads their turn.
-            self.store_downloaded_save(&game_id, &turn_id, &path)
-                .unwrap();
-            self.download_rx.remove(&game_id);
-        }
-        Ok(())
-    }
+    // #[instrument(skip(self, game))]
+    // async fn process_downloading_state(&mut self, game: Game) -> Result<()> {
+    //     let game_id = &game.game_id;
+    //     let turn_id = &game.current_turn.turn_id;
+    //
+    //     let rx = self.download_rx.get_mut(game_id).unwrap();
+    //     let mut completed_download = None;
+    //     loop {
+    //         let msg = match rx.try_recv() {
+    //             Ok(msg) => msg,
+    //             Err(TryRecvError::Empty) => break,
+    //             Err(err) => panic!("{:?}", err),
+    //         };
+    //         match msg {
+    //             DownloadMessage::Error(e) => {
+    //                 error!(?e, "Download");
+    //             }
+    //             DownloadMessage::Started(size) => {
+    //                 trace!(?size, "Started");
+    //             }
+    //             DownloadMessage::Chunk(percentage) => {
+    //                 trace!(?percentage, "Download progress");
+    //             }
+    //             DownloadMessage::Done(path) => {
+    //                 trace!("Done!");
+    //                 // Use update_state variable because we need to modify
+    //                 // `self.download_state` which is currently borrowed.
+    //                 completed_download = Some(path);
+    //                 break;
+    //             }
+    //         }
+    //     }
+    //     if let Some(path) = completed_download {
+    //         // Save the file into the DB because:
+    //         // 1) The user might delete the file in the future
+    //         // 2) Be able to analyse the file and compare when the user uploads their turn.
+    //         self.store_downloaded_save(&game_id, &turn_id, &path)
+    //             .unwrap();
+    //         self.download_rx.remove(&game_id);
+    //     }
+    //     Ok(())
+    // }
 
     #[instrument(skip(self, game))]
     async fn process_upload_queued(&mut self, game: Game) -> Result<()> {
