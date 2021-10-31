@@ -18,6 +18,7 @@ use iced::{
 };
 use notify::DebouncedEvent;
 use prefs::Prefs;
+use std::sync::Arc;
 use style::{cog_icon, done_icon, normal_text, steam_icon, title, ActionButtonStyle, ROW_HEIGHT};
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
@@ -121,6 +122,8 @@ impl Application for CivFunUi {
             settings_button_state: Default::default(),
         };
 
+        civfun.manager.start().unwrap();
+
         if civfun.manager.auth_key().unwrap().is_some() {
             // civfun.status_text = "Refreshing...".into();
             // return Command::batch([
@@ -182,8 +185,9 @@ impl Application for CivFunUi {
             }
             RequestRefresh => {
                 debug!("RequestRefresh");
-                todo!();
+                // todo!();
                 self.status_text = "Refreshing...".into();
+                warn!("RequestRefresh TODO!");
                 // return fetch_cmd(&self.manager);
             }
             PlayCiv => {
@@ -197,7 +201,7 @@ impl Application for CivFunUi {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             time::every(std::time::Duration::from_secs(60)).map(|_| Message::RequestRefresh),
-            time::every(std::time::Duration::from_millis(100)).map(|_| Message::GetManagerEvents),
+            time::every(std::time::Duration::from_millis(1000)).map(|_| Message::GetManagerEvents),
         ])
     }
 

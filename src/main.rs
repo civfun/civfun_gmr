@@ -40,6 +40,5 @@ fn run() -> anyhow::Result<()> {
     let db =
         sled::open(&db_path).with_context(|| format!("Could not create db at {:?}", &db_path))?;
     let mut manager = Manager::new(db);
-    manager.start()?;
     ui::run(manager)
 }

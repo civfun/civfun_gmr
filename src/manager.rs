@@ -524,12 +524,19 @@ impl Manager {
         drop(fp);
         let new_parsed_save = Civ5SaveReader::new(&bytes).parse()?;
 
-        let game = self.find_game_for_save(&new_parsed_save)?.unwrap();
-        let game_id = game.game_id;
-        self.db
-            .insert(Self::upload_bytes_db_key(&game_id), bytes)
-            .unwrap();
-        self.transfer.insert(game_id, TransferState::UploadQueued);
+        let potential_games = self.find_game_for_save(&new_parsed_save)?;
+        if potential_games.len() == 0 {
+            todo!("New save file has no potential matches. Ask user about it?");
+        } else if potential_games.len() == 1 {
+            let game = &potential_games[0];
+            let game_id = game.game_id;
+            self.db
+                .insert(Self::upload_bytes_db_key(&game_id), bytes)
+                .unwrap();
+            self.transfer.insert(game_id, TransferState::UploadQueued);
+        } else {
+            todo!("Multiple potential saves. Ask the user about it?");
+        }
 
         Ok(true)
     }
@@ -653,10 +660,25 @@ impl Manager {
         Ok(())
     }
 
-    fn find_game_for_save(&self, new_parsed_save: &Civ5Save) -> Result<Option<Game>> {
+    #[instrument(skip(self, new_parsed_save))]
+    fn find_game_for_save(&self, new_parsed_save: &Civ5Save) -> Result<Vec<Game>> {
+        let new_turn = new_parsed_save.header.turn;
+
+        // We're at the first turn. Only look for games that GMR say is the first turn.
+        let mut suspects = vec![];
+        if new_turn == 0 {
+            for game in self.my_games()? {
+                if game.current_turn.is_first_turn {
+                    suspects.push(game);
+                }
+            }
+            return Ok(suspects);
+        }
+
         let mut smallest_diff: Option<(u32, Game)> = None;
         for game in self.my_games()? {
-            let new_turn = new_parsed_save.header.turn;
+            let game_id = &game.game_id;
+            trace!(?game_id);
 
             // XXX: The turn in the filename doesn't match the API's turn.
             // let other_turn = info.game.current_turn.number;
@@ -698,14 +720,15 @@ impl Manager {
                 None => Some((diff, game.clone())),
             };
         }
+
         match smallest_diff {
             Some((_, game)) => {
                 info!(game_id = ?game.game_id, "Smallest diff found.");
-                Ok(Some(game))
+                Ok(vec![game])
             }
             None => {
                 warn!("No games found to compare.");
-                Ok(None)
+                Ok(vec![])
             }
         }
     }
