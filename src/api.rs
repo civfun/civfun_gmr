@@ -13,7 +13,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{info, instrument, trace, trace_span};
+use tracing::{info, instrument, trace, trace_span, Instrument};
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct UserId(u64);
@@ -247,46 +247,55 @@ impl Api {
         &self,
         game_id: &GameId,
         save_path: &PathBuf,
-    ) -> anyhow::Result<(mpsc::Receiver<DownloadMessage>, JoinHandle<()>)> {
+    ) -> anyhow::Result<mpsc::Receiver<DownloadMessage>> {
         trace!("Starting download.");
         let s = self.clone();
         let game_id = game_id.clone();
         let (tx, rx) = mpsc::channel(32);
         let save_path = save_path.clone();
-        let handle = tokio::spawn(async move {
-            let response = s
-                .get(
-                    "GetLatestSaveFileBytes",
-                    &[("gameId", &format!("{}", game_id))],
-                )
-                .await
-                .unwrap(); // TODO: unwrap
-            let size = response.content_length();
-            trace!(?size);
-            tx.send(DownloadMessage::Started(size)).await.unwrap();
-
-            let mut stream = response.bytes_stream();
-            let mut temp_file = NamedTempFile::new().unwrap(); // TODO: unwrap
-            let mut downloaded = 0;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes.unwrap();
-                downloaded += bytes.len();
-                temp_file.write_all(&bytes).unwrap(); // TODO: lots of unwrap
-                let percentage =
-                    size.map(|size| (downloaded as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
-                tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
-            }
-            info!(?save_path, "Saving to disk.");
-            temp_file.persist(&save_path).unwrap(); // TODO: unwrap
-            tx.send(DownloadMessage::Done(save_path)).await.unwrap();
-            trace!("Done.");
+        tokio::spawn(async move {
+            s.get_latest_save_file_bytes_async(tx, game_id, save_path)
+                .await;
         });
+        Ok(rx)
+    }
 
-        Ok((rx, handle))
+    #[instrument(skip(self, tx))]
+    async fn get_latest_save_file_bytes_async(
+        &self,
+        tx: mpsc::Sender<DownloadMessage>,
+        game_id: GameId,
+        save_path: PathBuf,
+    ) {
+        let response = self
+            .get(
+                "GetLatestSaveFileBytes",
+                &[("gameId", &format!("{}", game_id))],
+            )
+            .await
+            .unwrap(); // TODO: unwrap
+        let size = response.content_length();
+        trace!(?size);
+        tx.send(DownloadMessage::Started(size)).await.unwrap();
+
+        let mut stream = response.bytes_stream();
+        let mut temp_file = NamedTempFile::new().unwrap(); // TODO: unwrap
+        let mut downloaded = 0;
+        while let Some(bytes) = stream.next().await {
+            let bytes = bytes.unwrap();
+            downloaded += bytes.len();
+            temp_file.write_all(&bytes).unwrap(); // TODO: lots of unwrap
+            let percentage = size.map(|size| (downloaded as f32 / size as f32).try_into().unwrap()); // TODO: unwrap
+            tx.send(DownloadMessage::Chunk(percentage)).await.unwrap();
+        }
+        info!(?save_path, "Saving to disk.");
+        temp_file.persist(&save_path).unwrap(); // TODO: unwrap
+        tx.send(DownloadMessage::Done(save_path)).await.unwrap();
+        trace!("Done.");
     }
 
     #[instrument(skip(self))]
-    pub async fn upload_save_client(
+    pub fn upload_save_client(
         &self,
         turn_id: TurnId,
         bytes: Vec<u8>,

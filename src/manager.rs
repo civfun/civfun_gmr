@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, instrument, trace, trace_span, warn};
+use tracing::{debug, error, info, instrument, trace, trace_span, warn, Instrument};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -349,8 +349,8 @@ impl Manager {
         format!("analysed-{}-{}", game_id, turn_id)
     }
 
-    fn upload_bytes_db_key(game_id: &GameId) -> String {
-        format!("upload-bytes-{}", game_id)
+    fn upload_bytes_db_key(game_id: &GameId, turn_id: &TurnId) -> String {
+        format!("upload-bytes-{}-{}", game_id, turn_id)
     }
 
     /// Windows: ~\Documents\My Games\Sid Meier's Civilization 5\Saves\hotseat\
@@ -453,29 +453,33 @@ impl Manager {
             // would be dropped.
             let _ = watcher;
 
-            trace!("Loop started.");
-            loop {
-                let event = watch_rx.try_recv();
-                match event {
-                    Ok(event) => {
-                        info!(?event);
-                        if let DebouncedEvent::Create(path) = event {
-                            let filename = path.file_name().unwrap().to_str().unwrap().into();
-                            tx.send(filename).await.unwrap();
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        warn!("Disconnected");
-                        return;
-                    }
-                }
-
-                tokio::task::yield_now().await;
-            }
+            Self::watch_loop(watch_rx, tx).await;
         });
 
         Ok(())
+    }
+
+    async fn watch_loop(watch_rx: std::sync::mpsc::Receiver<DebouncedEvent>, tx: Sender<String>) {
+        trace!("Loop started.");
+        loop {
+            let event = watch_rx.try_recv();
+            match event {
+                Ok(event) => {
+                    info!(?event);
+                    if let DebouncedEvent::Create(path) = event {
+                        let filename = path.file_name().unwrap().to_str().unwrap().into();
+                        tx.send(filename).await.unwrap();
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    warn!("Disconnected");
+                    return;
+                }
+            }
+
+            tokio::task::yield_now().await;
+        }
     }
 
     pub fn process_new_saves(&mut self) -> Result<()> {
@@ -510,11 +514,11 @@ impl Manager {
     ///  - Move the uploaded file to `civfun Archive/[game_id]_[turn]_[up]_[original name]`
     #[instrument(skip(self))]
     fn handle_save(&mut self, filename: &str) -> Result<bool> {
-        let turn = Self::turn_from_filename(filename)?;
-        let turn = match turn {
-            Some(turn) => turn,
-            None => return Ok(false),
-        };
+        // let turn = Self::turn_from_filename(filename)?;
+        // let turn = match turn {
+        //     Some(turn) => turn,
+        //     None => return Ok(false),
+        // };
 
         let full_path = Self::save_dir()?.join(filename);
         trace!(?full_path);
@@ -529,9 +533,11 @@ impl Manager {
             todo!("New save file has no potential matches. Ask user about it?");
         } else if potential_games.len() == 1 {
             let game = &potential_games[0];
+            let turn_id = &game.current_turn.turn_id;
             let game_id = game.game_id;
+            trace!(?game_id, "Found game for save.");
             self.db
-                .insert(Self::upload_bytes_db_key(&game_id), bytes)
+                .insert(Self::upload_bytes_db_key(&game_id, &turn_id), bytes)
                 .unwrap();
             self.transfer.insert(game_id, TransferState::UploadQueued);
         } else {
@@ -557,7 +563,7 @@ impl Manager {
                 TransferState::Idle => self.process_idle_state(game)?,
                 // TransferState::Downloading() => self.process_downloading_state(game)?,
                 TransferState::Downloaded => {}
-                // TransferState::UploadQueued => self.process_upload_queued(game)?,
+                TransferState::UploadQueued => self.process_upload_queued(game)?,
                 // State::Uploading => self.handle_uploading(game)?,
                 // State::UploadComplete => self.handle_upload_complete(game).await?,
                 _ => todo!("{:?}", state),
@@ -578,7 +584,7 @@ impl Manager {
 
         let path = Self::save_dir()?.join(Self::filename(&game)?);
         trace!(?path, "Downloading.");
-        let (rx, handle) = self
+        let rx = self
             .api()?
             .get_latest_save_file_bytes(&game.game_id, &path)?;
 
@@ -631,31 +637,28 @@ impl Manager {
     // }
 
     #[instrument(skip(self, game))]
-    async fn process_upload_queued(&mut self, game: Game) -> Result<()> {
+    fn process_upload_queued(&mut self, game: Game) -> Result<()> {
         let game_id = game.game_id;
         let turn_id = game.current_turn.turn_id;
         info!(?game_id);
 
         self.transfer.insert(game_id, TransferState::Uploading);
 
-        todo!();
-        // let s = self.clone();
-        // tokio::spawn(async move {
-        //     // TODO: Second unwrap is for an empty entry.
-        //     // We're assuming the key exists if we've gone into this state.
-        //     let bytes =
-        //         s.db.get(Self::upload_bytes_db_key(&game_id))
-        //             .unwrap()
-        //             .unwrap();
-        //
-        //     info!(?game_id, ?turn_id, "Uploading.");
-        //     let rx = s
-        //         .api()
-        //         .unwrap()
-        //         .upload_save_client(turn_id, bytes.to_vec())
-        //         .await
-        //         .unwrap();
-        // });
+        // TODO: Second unwrap is for an empty entry.
+        // We're assuming the key exists if we've gone into this state.
+        let bytes = self
+            .db
+            .get(Self::upload_bytes_db_key(&game_id, &turn_id))
+            .unwrap()
+            .unwrap();
+
+        info!(?game_id, ?turn_id, "Uploading.");
+        let rx = self
+            .api()?
+            .upload_save_client(turn_id, bytes.to_vec())
+            .unwrap();
+
+        self.upload_rx.insert(game_id, rx);
 
         Ok(())
     }
@@ -788,6 +791,12 @@ impl Manager {
             let turn_id = game.current_turn.turn_id;
 
             if self
+                .db
+                .contains_key(Self::upload_bytes_db_key(&game_id, &turn_id))?
+            {
+                trace!(?game_id, "Marking game as ready to upload.");
+                self.transfer.insert(game_id, TransferState::UploadQueued);
+            } else if self
                 .db
                 .contains_key(Self::saved_bytes_db_key(&game_id, &turn_id))?
             {
