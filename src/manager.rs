@@ -13,6 +13,7 @@ use sled::IVec;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
@@ -39,7 +40,7 @@ pub struct StoredPlayer {
 #[derive(Debug)]
 pub enum TransferState {
     Idle,
-    Downloading(Receiver<DownloadMessage>),
+    Downloading,
     Downloaded,
     UploadQueued,
     Uploading,
@@ -66,6 +67,7 @@ pub struct Manager {
     transfer: HashMap<GameId, TransferState>,
     auth_rx: Option<oneshot::Receiver<Option<UserId>>>,
     fetch_games_rx: Option<mpsc::Receiver<Result<FetchGames>>>,
+    download_rx: HashMap<GameId, Receiver<DownloadMessage>>,
     upload_rx: HashMap<GameId, Receiver<UploadMessage>>,
     watch_files_rx: Option<Receiver<String>>,
 }
@@ -78,6 +80,7 @@ impl Manager {
             auth_rx: None,
             fetch_games_rx: None,
             // download_rx: Default::default(),
+            download_rx: Default::default(),
             upload_rx: Default::default(),
             watch_files_rx: None,
         }
@@ -550,7 +553,8 @@ impl Manager {
     #[instrument(skip(self))]
     pub fn process_transfers(&mut self) -> Result<()> {
         for game in self.my_games()? {
-            let game_id = game.game_id;
+            let game_id = &game.game_id;
+            let turn_id = &game.current_turn.turn_id;
 
             let state = self
                 .transfer
@@ -561,7 +565,7 @@ impl Manager {
 
             match state {
                 TransferState::Idle => self.process_idle_state(game)?,
-                // TransferState::Downloading() => self.process_downloading_state(game)?,
+                TransferState::Downloading => self.process_downloading_state(&game_id, &turn_id)?,
                 TransferState::Downloaded => {}
                 TransferState::UploadQueued => self.process_upload_queued(game)?,
                 // State::Uploading => self.handle_uploading(game)?,
@@ -589,52 +593,52 @@ impl Manager {
             .get_latest_save_file_bytes(&game.game_id, &path)?;
 
         self.transfer
-            .insert(game.game_id, TransferState::Downloading(rx));
+            .insert(game.game_id, TransferState::Downloading);
+        self.download_rx.insert(game.game_id, rx);
         Ok(())
     }
 
-    // #[instrument(skip(self, game))]
-    // async fn process_downloading_state(&mut self, game: Game) -> Result<()> {
-    //     let game_id = &game.game_id;
-    //     let turn_id = &game.current_turn.turn_id;
-    //
-    //     let rx = self.download_rx.get_mut(game_id).unwrap();
-    //     let mut completed_download = None;
-    //     loop {
-    //         let msg = match rx.try_recv() {
-    //             Ok(msg) => msg,
-    //             Err(TryRecvError::Empty) => break,
-    //             Err(err) => panic!("{:?}", err),
-    //         };
-    //         match msg {
-    //             DownloadMessage::Error(e) => {
-    //                 error!(?e, "Download");
-    //             }
-    //             DownloadMessage::Started(size) => {
-    //                 trace!(?size, "Started");
-    //             }
-    //             DownloadMessage::Chunk(percentage) => {
-    //                 trace!(?percentage, "Download progress");
-    //             }
-    //             DownloadMessage::Done(path) => {
-    //                 trace!("Done!");
-    //                 // Use update_state variable because we need to modify
-    //                 // `self.download_state` which is currently borrowed.
-    //                 completed_download = Some(path);
-    //                 break;
-    //             }
-    //         }
-    //     }
-    //     if let Some(path) = completed_download {
-    //         // Save the file into the DB because:
-    //         // 1) The user might delete the file in the future
-    //         // 2) Be able to analyse the file and compare when the user uploads their turn.
-    //         self.store_downloaded_save(&game_id, &turn_id, &path)
-    //             .unwrap();
-    //         self.download_rx.remove(&game_id);
-    //     }
-    //     Ok(())
-    // }
+    #[instrument(skip(self))]
+    fn process_downloading_state(&mut self, game_id: &GameId, turn_id: &TurnId) -> Result<()> {
+        let rx: &mut Receiver<DownloadMessage> = self.download_rx.get_mut(game_id).unwrap();
+
+        let mut completed_download = None;
+        loop {
+            let msg = match rx.try_recv() {
+                Ok(msg) => msg,
+                Err(TryRecvError::Empty) => break,
+                Err(err) => panic!("{:?}", err),
+            };
+            match msg {
+                DownloadMessage::Error(e) => {
+                    error!(?e, "Download");
+                }
+                DownloadMessage::Started(size) => {
+                    trace!(?size, "Started");
+                }
+                DownloadMessage::Chunk(percentage) => {
+                    trace!(?percentage, "Download progress");
+                }
+                DownloadMessage::Done(path) => {
+                    trace!("Done!");
+                    // Use update_state variable because we need to modify
+                    // `self.download_state` which is currently borrowed.
+                    completed_download = Some(path);
+                    break;
+                }
+            }
+        }
+        if let Some(path) = completed_download {
+            // Save the file into the DB because:
+            // 1) The user might delete the file in the future
+            // 2) Be able to analyse the file and compare when the user uploads their turn.
+            self.store_downloaded_save(&game_id, &turn_id, &path)
+                .unwrap();
+            self.transfer
+                .insert(game_id.clone(), TransferState::Downloaded);
+        }
+        Ok(())
+    }
 
     #[instrument(skip(self, game))]
     fn process_upload_queued(&mut self, game: Game) -> Result<()> {
